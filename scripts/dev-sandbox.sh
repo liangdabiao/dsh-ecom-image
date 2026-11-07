@@ -10,6 +10,6 @@ cd "$ROOT"
 npm run --silent build
 unset DSH_SESSION_ID DSH_SHELL DSH_WEB_URL DSH_PROFILE DSH_PROFILE_DIR
 export DSH_HOME="$SANDBOX"
-dsh plugin --profile web remove "$(node -p "require('$ROOT/package.json').name")" >/dev/null 2>&1 || true
+dsh plugin --profile web remove "$(basename "$ROOT")" >/dev/null 2>&1 || true
 dsh plugin --profile web add "file:$ROOT" >/dev/null
 exec dsh --profile web --no-open --port "$PORT"

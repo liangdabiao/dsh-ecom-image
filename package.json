@@ -1,7 +1,7 @@
 {
   "name": "dsh-ecom-image",
-  "version": "0.1.0",
-  "description": "电商视觉创作技能：25 个场景模板（主图/场景/平铺/详情页/UGC 等）、Campaign Style Lock 一致性、转化驱动力诊断、GPT-Image-2 Prompt 铁律。可选通过 apiz CLI 直接出图。",
+  "version": "0.2.0",
+  "description": "电商图片生成工作台：apiz CLI 直接生图、生成历史画廊、Campaign Style Lock 持久化、25 个场景模板查询。侧栏面板含画廊（大图预览/campaign 筛选）、模板浏览器、Style Lock 一览。",
   "license": "MIT",
   "type": "module",
   "main": "src/host.js",

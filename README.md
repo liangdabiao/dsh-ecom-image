@@ -1,24 +1,51 @@
 # dsh-ecom-image · 电商视觉创作
 
-DeepSeek Harness（dsh）插件：**电商视觉创作技能**——25 个场景模板（主图/场景/平铺/详情页/UGC/直播 等）、Campaign Style Lock 一致性机制、转化驱动力诊断、GPT-Image-2 Prompt 铁律。可选通过 apiz CLI 直接出图。
+DeepSeek Harness（dsh）插件：**电商图片生成 + 管理工作台**。不只是教模型写 Prompt——4 个原生工具覆盖模板查询、Style Lock 持久化、apiz CLI 直接生图、生成历史管理，侧栏面板提供画廊（大图预览 / 按 campaign 筛选）、模板浏览器、Style Lock 一览。
 
-技能来自 [ecom-details-image](https://github.com/liangdabiao/ecom-details-image)（MIT，liangdabiao）。
+技能方法论来自 [ecom-details-image](https://github.com/liangdabiao/ecom-details-image)（MIT，liangdabiao）。
 
 ## 装上以后有什么
 
 | 能力 | 说明 |
 |---|---|
-| `ecom-details-image` 技能 | `/ecom-details-image` 斜杠命令 + 模型自主触发：视觉简报 + Prompt + Campaign Style Lock + 转化诊断。两种模式（Prompt/Brief 和 Generate） |
-| 25 个场景模板 | 主图/生活场景/平铺/细节/海报/社媒/UGC/模特/前后对比/包装/信息图/创意概念/尺码/多产品/直播/试穿/爆炸图/幽灵模特/多角度/杂志/季节/奢侈/设备/店面/运动 |
-| 侧栏「电商视觉」面板 | 25 模板速览 + Campaign Style Lock 说明 + 两种模式说明 |
-| Generate 模式 | 可选通过 apiz CLI 直接出图（需安装 apiz CLI 并 auth login） |
+| `ecom_generate_image` | apiz CLI 直接生图：支持参考图上传走图生图（保证产品外观准确）、比例 1:1/16:9/9:16 等多种、传 `campaign` 自动注入 Style Lock。结果自动下载入档、入历史 |
+| `ecom_style_lock` | Campaign Style Lock **持久化**：色板/冷暖调/字体/背景/光线/布局/图标风格整套锁定，多图一致性；set/get/list/delete/render |
+| `ecom_history` | 生图历史：Prompt、模型、比例、消耗积分、图片文件路径；list/get/clear |
+| `ecom_template` | 25 个场景模板查询：list/search（中英文关键词）/get 拿完整 prompt_template/variants/category_tips/examples |
+| `ecom-details-image` 技能 | 视觉简报 + Prompt 写作方法论 + 转化驱动力诊断（模型自主触发） |
+| 侧栏「电商视觉」面板 | **画廊**（缩略图网格 + 点击大图预览 + campaign 筛选）、**模板**浏览器（点开看完整定义）、**Style Lock** 一览、使用指南 |
 
 ## 使用
 
-对话里一句话：**「帮我做一款保温杯的电商主图」**或**「生成一套 5 主图 + 7 详情图的完整图片包」**。
+对话里一句话：
 
-模型按 Prompt/Brief 模式输出视觉简报 + Prompt + Campaign Style Lock。如果装了 apiz CLI，还可以直接出图。
+- **「帮我做一款保温杯的电商主图」**——模型匹配 hero-image 模板构建 Prompt，要出图时调 `ecom_generate_image`
+- **「生成一套 5 主图 + 7 详情图的完整图片包」**——模型先 `ecom_style_lock` 建锁，然后每张图传 `campaign` 保证全套一致；出完在面板画廊按 campaign 筛选整套
+- **「用这张实拍图做白底图」**——传 `reference_image` 走图生图
 
+## 数据存哪
+
+`$DSH_HOME/ecom-image/`（默认 `~/.dsh/ecom-image/`）：
+
+```
+history.json   生图历史（最多 500 条）
+images/        生成的图片文件
+stylelock.json Campaign Style Lock
+```
+
+## 前置条件（Generate 模式）
+
+生图走 [apiz CLI](https://apiz.ai)（认证由 CLI 自理，插件不接触密钥），消耗 apiz 积分：
+
+```bash
+# 安装 apiz CLI 后
+apiz auth login
+apiz account balance   # 查积分
+```
+
+不装 apiz 也能用：模型照样输出完整 Prompt 包，拿去即梦/Midjourney 手动生成。
+
+默认模型 `apiz/gpt-image-2.5-flare`，可在插件 Config 改 `defaultModel` 或指定 `apizBin`。
 
 ## 安装
 
