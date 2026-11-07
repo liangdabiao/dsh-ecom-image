@@ -1,0 +1,5 @@
+# 电商视觉创作：技能快照（SKILL.md + 25 模板 + apiz CLI 生图脚本）。
+# 浏览器半边由 dsh.client 声明加载。
+- insert:
+    - id: ecom-image
+      name: 'dsh-ecom-image'
