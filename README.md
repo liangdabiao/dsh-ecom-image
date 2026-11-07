@@ -19,6 +19,13 @@ DeepSeek Harness（dsh）插件：**电商视觉创作技能**——25 个场景
 
 模型按 Prompt/Brief 模式输出视觉简报 + Prompt + Campaign Style Lock。如果装了 apiz CLI，还可以直接出图。
 
+
+## 安装
+
+```bash
+dsh plugin --profile web add dsh-ecom-image
+```
+
 ## 许可
 
 MIT（liangdabiao）
