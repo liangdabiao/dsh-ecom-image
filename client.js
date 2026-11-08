@@ -8,6 +8,9 @@ const { useState, useEffect, useMemo } = require('react')
 const PANEL_ID = 'ecom-image'
 const BASE = 'ecom-image'
 
+// 「马上使用」的开对话能力（apply 里注入），GuideTab 的按钮直接用它
+let openInChat = null
+
 function PanelIcon(props) {
   return h('svg', { width: 24, height: 24, viewBox: '0 0 24 24', fill: 'none', ...props },
     h('rect', { x: 2.5, y: 2.5, width: 19, height: 19, rx: 5, fill: '#8a5a00' }),
@@ -193,8 +196,21 @@ function LockTab() {
 // ---------------------------------------------------------------------------
 // 指南
 // ---------------------------------------------------------------------------
+
+// 「马上使用」：开新对话并把出图指令填进输入框（不直接发送，用户补上产品/风格再回车）。
+// 走 Host 的 uiWorkspace.startSession（与「运营 Agent」「卖家工具箱」「小红书验证」「评论 VOC」同一套入口）：
+//   startSession(sessionId?, { prompt, whenDraftExists: 'keep'|'replace'|'append' })
+const USE_PROMPT = '使用‘电商视觉’插件 生成电商图片：'
+
 function GuideTab() {
+  const use = () => { if (openInChat) openInChat(USE_PROMPT) }
   return h('div', null,
+    h('div', { style: styles.ctaCard },
+      h('div', { style: styles.ctaText },
+        h('div', { style: styles.ctaTitle }, '想做一套电商图？'),
+        h('div', { style: styles.muted },
+          '点「马上使用」→ 开新对话，输入框已填好指令；补上产品与主图/场景图/A+ 需求后回车即可。')),
+      h('button', { style: styles.ctaButton, onClick: use, title: `填进对话：${USE_PROMPT}` }, '🚀 马上使用')),
     h('div', { style: styles.card },
       h('div', { style: styles.sectionTitle }, '怎么用'),
       h('div', { style: styles.stepList },
@@ -225,21 +241,21 @@ function GuideTab() {
 // 主面板
 // ---------------------------------------------------------------------------
 const TABS = [
+  ['guide', '指南'],
   ['gallery', '画廊'],
   ['templates', '模板'],
   ['lock', 'Style Lock'],
-  ['guide', '指南'],
 ]
 
 function Panel() {
-  const [tab, setTab] = useState('gallery')
+  const [tab, setTab] = useState('guide')
   return h('div', { style: styles.wrap },
     h('div', { style: styles.tabBar },
       TABS.map(([id, label]) => h('button', {
         key: id, style: tab === id ? styles.tabActive : styles.tab,
         onClick: () => setTab(id),
       }, label))),
-    tab === 'gallery' ? h(GalleryTab) : tab === 'templates' ? h(TemplatesTab) : tab === 'lock' ? h(LockTab) : h(GuideTab))
+    tab === 'guide' ? h(GuideTab) : tab === 'gallery' ? h(GalleryTab) : tab === 'templates' ? h(TemplatesTab) : h(LockTab))
 }
 
 const styles = {
@@ -247,6 +263,10 @@ const styles = {
   tabBar: { display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' },
   tab: { padding: '8px 16px', border: '1px solid #d9d9de', borderRadius: 8, background: '#fff', color: '#1a1a1a', cursor: 'pointer', fontSize: 13 },
   tabActive: { padding: '8px 16px', border: '1px solid #8a5a00', borderRadius: 8, background: '#f5f0e8', color: '#5a3a00', cursor: 'pointer', fontWeight: 600, fontSize: 13 },
+  ctaCard: { display: 'flex', gap: 12, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', background: '#faf6ef', border: '1px solid #ecdfc7', borderRadius: 10, padding: '12px 14px', marginBottom: 12 },
+  ctaText: { flex: 1, minWidth: 200 },
+  ctaTitle: { fontWeight: 700, color: '#5a3a00', marginBottom: 4 },
+  ctaButton: { padding: '10px 20px', border: 'none', borderRadius: 10, background: '#8a5a00', color: '#fff', cursor: 'pointer', fontSize: 14, fontWeight: 700, boxShadow: '0 2px 6px rgba(138,90,0,.25)' },
   row: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 },
   chip: { padding: '4px 12px', border: '1px solid #d9d9de', borderRadius: 999, background: '#fff', cursor: 'pointer', fontSize: 12 },
   chipActive: { padding: '4px 12px', border: '1px solid #8a5a00', borderRadius: 999, background: '#f5f0e8', color: '#5a3a00', cursor: 'pointer', fontSize: 12, fontWeight: 600 },
@@ -294,6 +314,15 @@ const styles = {
 }
 
 function apply(ctx) {
+  // 一键入口：开新对话并预填「使用‘电商视觉’插件 生成电商图片：」（不直接发送）
+  openInChat = (prompt) => {
+    try {
+      ctx.uiWorkspace.startSession(undefined, { prompt, whenDraftExists: 'replace' })
+    } catch (err) {
+      console.error('[ecom-image] 开新对话失败', err)
+      alert('开新对话失败：' + ((err && err.message) || err))
+    }
+  }
   ctx.slots.inject('sidebar.panellist', () =>
     ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_ID, order: 14, label: () => '电商视觉' }, PanelIcon))
   ctx.slots.inject('main', () =>
@@ -301,5 +330,5 @@ function apply(ctx) {
 }
 
 exports.isPlugin = true
-exports.inject = ['slots']
+exports.inject = ['slots', 'uiWorkspace']
 exports.apply = apply

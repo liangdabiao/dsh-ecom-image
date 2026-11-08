@@ -50,8 +50,26 @@ apiz account balance   # 查积分
 ## 安装
 
 ```bash
-dsh plugin --profile web add dsh-ecom-image
+# 从 GitHub 装（dist/client.js 已入库，装完即有面板）
+dsh plugin --profile web add github:liangdabiao/dsh-ecom-image
+
+# 钉版本
+dsh plugin --profile web add github:liangdabiao/dsh-ecom-image#v0.2.1
 ```
+
+> ⚠️ 本包**没有发布到 npm**，`dsh plugin add dsh-ecom-image` 会失败——请用上面的 `github:` 形式。
+>
+> `dist/client.js` 是入库文件：dsh 宿主直接消费已构建的客户端 bundle（`package.json` → `exports["./client"]`），缺它会导致插件激活失败、侧栏「电商视觉」面板不出现。改完源码记得 `npm run build` 再提交。
+
+## 一键开始
+
+面板默认打开 **指南** 标签，顶部有 **🚀 马上使用** 按钮：点了会开一个新对话，输入框里已经填好
+
+```
+使用‘电商视觉’插件 生成电商图片：
+```
+
+补上产品与主图/场景图/A+ 需求后回车即可。
 
 ## 许可
 
