@@ -204,8 +204,10 @@ def build_generate_args(prompt: str, model: str, ratio: str,
         "generate", prompt, "--model", model, "--aspect-ratio", ratio,
         "--wait", "--wait-timeout", f"{wait_timeout}s",
     ]
+    # apiz 的图生图参数是 --params '{"reference_image_urls":[...]}'（1–16 张公网 URL）。
+    # 注意：不要用 --image-url，网关会当成未知参数丢弃，静默退化成文生图。
     if image_url:
-        cli_args += ["--image-url", image_url]
+        cli_args += ["--params", json.dumps({"reference_image_urls": [image_url]}, ensure_ascii=False)]
     return cli_args
 
 

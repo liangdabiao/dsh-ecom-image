@@ -65,8 +65,54 @@ await test('data: renderLockText 渲染字段 + 空锁为空串', async () => {
   data.deleteStyleLock('x'); data.deleteStyleLock('empty')
 })
 
-await test('data: safeImageFile 拒绝路径穿越', async () => {
-  assert.equal(data.safeImageFile('../../etc/passwd'), null)
+// ── 一次一张的闸门 ──────────────────────────────────────────
+await test('data: pendingReview 只认 awaiting 的最新一条', async () => {
+  data.clearHistory()
+  assert.equal(data.pendingReview(), null)
+  data.appendHistory({ id: 'g-done', reviewState: 'approved' })
+  data.appendHistory({ id: 'g-wait', reviewState: 'awaiting' })
+  assert.equal(data.pendingReview().id, 'g-wait')
+})
+
+await test('data: recordReview —— approve 必须 6 项全 true', async () => {
+  data.clearHistory()
+  data.appendHistory({ id: 'r1', reviewState: 'awaiting', files: [{ file: 'a.png' }] })
+  const allPass = Object.fromEntries(data.REVIEW_CHECK_KEYS.map((k) => [k, true]))
+  const partial = { ...allPass, physicalGrounding: false }
+  const bad = data.recordReview('r1', { verdict: 'approve', checks: partial })
+  assert.equal(bad.ok, false)
+  assert.match(bad.error, /physicalGrounding/)
+  const ok = data.recordReview('r1', { verdict: 'approve', checks: allPass })
+  assert.equal(ok.ok, true)
+  assert.equal(data.readHistory()[0].reviewState, 'approved')
+  assert.equal(data.pendingReview(), null)
+  // 不能重复验收
+  assert.equal(data.recordReview('r1', { verdict: 'approve', checks: allPass }).ok, false)
+})
+
+await test('data: recordReview —— reject 记录原因并放行下一张', async () => {
+  data.clearHistory()
+  data.appendHistory({ id: 'r2', reviewState: 'awaiting' })
+  const res = data.recordReview('r2', { verdict: 'reject', checks: { physicalGrounding: false }, notes: '车轮悬空' })
+  assert.equal(res.ok, true)
+  assert.equal(data.readHistory()[0].reviewState, 'rejected')
+  assert.equal(data.readHistory()[0].review.notes, '车轮悬空')
+  assert.equal(data.pendingReview(), null)
+})
+
+await test('data: acquireGenerateLock 互斥 + 释放后可再取', async () => {
+  const l1 = data.acquireGenerateLock()
+  assert.equal(l1.ok, true)
+  const l2 = data.acquireGenerateLock()
+  assert.equal(l2.ok, false)
+  assert.match(l2.reason, /一次只允许一张/)
+  l1.release()
+  const l3 = data.acquireGenerateLock()
+  assert.equal(l3.ok, true)
+  l3.release()
+})
+
+await test('data: safeImageFile 拒绝路径穿越', async () => {  assert.equal(data.safeImageFile('../../etc/passwd'), null)
   assert.equal(data.safeImageFile('a/b.png'), null)
   assert.equal(data.safeImageFile('a\\b.png'), null)
   assert.equal(data.safeImageFile('..\\..\\x.png'), null)
@@ -91,6 +137,68 @@ await test('apiz: 模块可导入且导出齐全', async () => {
 await test('apiz: generateImage 对不存在参考图报错', async () => {
   const apiz = await import('../lib/apiz.js')
   await assert.rejects(() => apiz.uploadReferenceImage('Z:/no/such/file.png'), /参考图片不存在/)
+})
+
+// 回归守卫：图生图必须走 --params {"reference_image_urls":[...]}，禁止再用 --image-url
+await test('apiz: buildGenerateArgs 参考图走 reference_image_urls', async () => {
+  const apiz = await import('../lib/apiz.js')
+  const ref = 'https://cdn.example.com/a.jpg'
+  const args = apiz.buildGenerateArgs({ prompt: 'p', model: 'm', aspectRatio: '4:5', referenceImageUrls: [ref] })
+  assert.ok(!args.includes('--image-url'), '不能在用 --image-url')
+  const i = args.indexOf('--params')
+  assert.ok(i > -1, '必须带 --params')
+  const params = JSON.parse(args[i + 1])
+  assert.deepEqual(params.reference_image_urls, [ref])
+  assert.equal(args[args.indexOf('--aspect-ratio') + 1], '4:5')
+})
+
+await test('apiz: 无参考图时不带 --params', async () => {
+  const apiz = await import('../lib/apiz.js')
+  const args = apiz.buildGenerateArgs({ prompt: 'p', model: 'm', aspectRatio: '1:1' })
+  assert.equal(args.includes('--params'), false)
+})
+
+await test('apiz: normalizeReferenceUrls 过滤非 http/去重/限 16 张', async () => {
+  const apiz = await import('../lib/apiz.js')
+  assert.deepEqual(apiz.normalizeReferenceUrls(''), [])
+  assert.deepEqual(apiz.normalizeReferenceUrls(['ftp://x/a.jpg', '', 'https://a/1.jpg', 'https://a/1.jpg']), ['https://a/1.jpg'])
+  const many = Array.from({ length: 20 }, (_, i) => `https://a/${i}.jpg`)
+  assert.equal(apiz.normalizeReferenceUrls(many).length, 16)
+  assert.equal(apiz.MAX_REFERENCE_IMAGES, 16)
+})
+
+// 回归守卫：给了参考图却全是本地路径/坏 URL 时必须立刻报错，禁止静默退化成文生图
+await test('apiz: 参考图无效时 buildGenerateArgs 直接报错', async () => {
+  const apiz = await import('../lib/apiz.js')
+  assert.throws(() => apiz.buildGenerateArgs({ prompt: 'p', model: 'm', aspectRatio: '1:1', referenceImageUrls: ['D:/a/b.jpg'] }), /参考图无效/)
+  assert.throws(() => apiz.buildGenerateArgs({ prompt: 'p', model: 'm', aspectRatio: '1:1', referenceImageUrls: ['ftp://a/b.jpg'] }), /参考图无效/)
+})
+
+await test('apiz: 模型参考图能力表 + 报错翻译', async () => {
+  const apiz = await import('../lib/apiz.js')
+  assert.equal(apiz.refSupportFor('apiz/gpt-image-2.5-flare'), 'reference_image_urls')
+  assert.equal(apiz.refSupportFor('some/unknown-model'), null)
+  assert.match(apiz.explainApizError('apiz: HTTP 400 — 不支持的参数: image_url'), /reference_image_urls/)
+  assert.match(apiz.explainApizError('apiz: HTTP 429 — 计费失败: API Key 额度不足'), /余额|充值/)
+  assert.match(apiz.explainApizError('apiz: task xxx timed out after 6m45s'), /tasks get/)
+})
+
+await test('apiz: imageSizeFromBuffer 读 PNG/JPEG 尺寸', async () => {
+  const apiz = await import('../lib/apiz.js')
+  // 构造最小 PNG 头
+  const png = Buffer.alloc(32)
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(png, 0)
+  png.writeUInt32BE(13, 8)
+  png.write('IHDR', 12, 'ascii')
+  png.writeUInt32BE(928, 16)
+  png.writeUInt32BE(1152, 20)
+  assert.deepEqual(apiz.imageSizeFromBuffer(png), { width: 928, height: 1152 })
+  // 4:5 比例核验
+  const ok = apiz.ratioMismatch('4:5', { width: 928, height: 1152 })
+  assert.equal(ok.ok, true)
+  const bad = apiz.ratioMismatch('4:5', { width: 1024, height: 1024 })
+  assert.equal(bad.ok, false)
+  assert.equal(apiz.ratioMismatch('4:5', null), null)
 })
 
 // ── templates.js ───────────────────────────────────────────
@@ -134,9 +242,9 @@ await test('skills: provider list/get 带 addendum 工具指引', async () => {
 // ── host.js：工具对象结构 + 校验 + 全链路（不打 apiz 网络）──
 const host = await import('../src/host.js')
 
-await test('host: 4 个工具注册齐全、schema additionalProperties:false', async () => {
+await test('host: 5 个工具注册齐全、schema additionalProperties:false', async () => {
   assert.equal(host.name, 'ecom-image')
-  for (const tool of [host.ecomGenerateImageTool, host.ecomHistoryTool, host.ecomStyleLockTool, host.ecomTemplateTool]) {
+  for (const tool of [host.ecomGenerateImageTool, host.ecomReviewImageTool, host.ecomHistoryTool, host.ecomStyleLockTool, host.ecomTemplateTool]) {
     assert.equal(tool.output.schema.additionalProperties, false)
     assert.equal(tool.parameters.additionalProperties, false)
     assert.ok(tool.description.length > 30)
@@ -154,6 +262,7 @@ await test('host: check 未知参数/坏枚举拒绝', async () => {
 })
 
 await test('host: ecom_history list/get/clear 全链路', async () => {
+  data.clearHistory()
   data.appendHistory({ id: 'h1', ts: new Date().toISOString(), status: 'completed', prompt: 'test prompt for history', price: 5, model: 'm', aspectRatio: '1:1', files: [{ file: 'a.png', url: 'http://x' }] })
   const listed = await host.ecomHistoryTool.execute({ action: 'list', limit: 5 })
   assert.equal(listed.ok, true)

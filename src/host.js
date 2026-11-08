@@ -7,8 +7,9 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createSkillProvider } from '../lib/skills.js'
 import { registerApi } from '../lib/api.js'
-import { ensureDirs, readHistory, appendHistory, updateHistory, clearHistory, getStyleLock, setStyleLock, deleteStyleLock, readStyleLocks, renderLockText, IMAGES_DIR, DATA_DIR } from '../lib/data.js'
-import { DEFAULT_MODEL, setApizBin, uploadReferenceImage, generateImage, downloadImages } from '../lib/apiz.js'
+import { ensureDirs, readHistory, appendHistory, updateHistory, clearHistory, getStyleLock, setStyleLock, deleteStyleLock, readStyleLocks, renderLockText, pendingReview, acquireGenerateLock, recordReview, REVIEW_CHECK_KEYS, IMAGES_DIR, DATA_DIR } from '../lib/data.js'
+import { DEFAULT_MODEL, MAX_REFERENCE_IMAGES, REF_PARAM, setApizBin, uploadReferenceImage, generateImage, downloadImages, imageSizeFromBuffer, ratioMismatch } from '../lib/apiz.js'
+import { readFileSync } from 'node:fs'
 import { listTemplates, getTemplate, searchTemplates } from '../lib/templates.js'
 
 export const name = 'ecom-image' // = cordis.patch.yml 的 id
@@ -41,6 +42,7 @@ function check(args, spec) {
 
 const str = (description, extra = {}) => ({ type: 'string', description, ...extra })
 const num = (description, extra = {}) => ({ type: 'number', description, ...extra })
+const arr = (description, extra = {}) => ({ type: 'array', items: { type: 'string' }, description, ...extra })
 const text = (value) => [{ type: 'text', text: value }]
 
 const OUTPUT = {
@@ -59,13 +61,24 @@ const OUTPUT = {
 
 const result = (ok, summary, data = '') => ({ ok, summary, data })
 
+const CHECK_LABELS = {
+  productFidelity: '产品与参考图逐项一致（轮廓/结构/配色/牌匾文字）',
+  physicalGrounding: '物理落地：轮子踩在面上、有接触阴影、无悬空穿模',
+  perspective: '透视一致：产品与桌面/道具同一灭点，道具比例合理',
+  composition: '产品占比与留白达标',
+  color: '色彩与参考图同色系',
+  cleanliness: '无多余文字/尺寸标注/水印/杂物',
+}
+
 // ---------------------------------------------------------------------------
 // 工具 1：ecom_generate_image —— apiz CLI 生图 + 自动入历史 + 可挂 Style Lock
 // ---------------------------------------------------------------------------
 export const ecomGenerateImageTool = {
   name: 'ecom_generate_image',
   description:
-    '用 apiz CLI 直接生成电商图片（主图/场景图/UGC 种草图/详情图等），生成结果自动存档并可在线板「画廊」查看。' +
+    '用 apiz CLI 直接生成电商图片——**一次只出一张**。出图后必须立刻把图和 6 项自检结果发给用户，' +
+    '并用 ecom_review_image 记录验收结论；有未验收的记录时本工具会直接拒绝开新任务（防批量烧钱）。' +
+    '要锁住产品外观一致性，必须传参考图：reference_image（本地绝对路径，自动上传 CDN）/ reference_image_url / reference_images（数组，最多 16 张）。' +
     'prompt 应为完整的英文生图 Prompt；如有多图任务，先用 ecom_style_lock 建立并锁定 Campaign Style Lock，' +
     '再传 campaign 参数让每张图自动注入同一段一致性约束。需用户已安装 apiz CLI 并 auth login（消耗 apiz 积分）。',
   parameters: {
@@ -80,6 +93,7 @@ export const ecomGenerateImageTool = {
       model: str('可选：apiz 图片模型 id，默认配置里的 defaultModel'),
       reference_image: str('可选：本地参考产品图绝对路径，先上传 apiz CDN 再走图生图（保证产品外观准确）'),
       reference_image_url: str('可选：参考图公网 URL（与 reference_image 二选一，URL 优先）'),
+      reference_images: arr('可选：多张参考图（本地路径或公网 URL 混合），最多 16 张；传了它则忽略上面两个单图参数'),
       timeout: num('可选：单张生成等待上限秒数，默认 420'),
     },
   },
@@ -90,6 +104,19 @@ export const ecomGenerateImageTool = {
     const cfg = configRef.config
     ensureDirs()
     setApizBin(typeof cfg?.apizBin === 'string' ? cfg.apizBin : '')
+
+    // ── 一次一张 · 闸门 1：上一张还没验收，先别出新的 ──
+    const pending = pendingReview()
+    if (pending) {
+      throw new Error(
+        `上一张图还没验收，拒绝开始新的一张。\n` +
+        `待验收：${pending.id}｜${pending.title || '未命名'}｜文件 ${(pending.files?.[0]?.file) || 'N/A'}\n` +
+        `请先把这张图 + 6 项自检结果发给用户，再用 ecom_review_image 记录结论（verdict: approve / reject），之后才能出下一张。`)
+    }
+    // ── 一次一张 · 闸门 2：并发互斥（防我一次并行开好几张）──
+    const lock = acquireGenerateLock()
+    if (!lock.ok) throw new Error(`${lock.reason}。等这一张落盘并验收后再继续。`)
+    try {
     const model = args.model || (typeof cfg?.defaultModel === 'string' && cfg.defaultModel) || DEFAULT_MODEL
     const aspectRatio = args.size || '1:1'
 
@@ -106,12 +133,20 @@ export const ecomGenerateImageTool = {
     const lockText = renderLockText(lock)
     const finalPrompt = lockText ? `${args.prompt}\n\n${lockText}` : args.prompt
 
-    // 参考图上传
-    let imageUrl = args.reference_image_url || null
-    let refPath = null
-    if (!imageUrl && args.reference_image) {
-      imageUrl = await uploadReferenceImage(args.reference_image)
-      refPath = args.reference_image
+    // 参考图收集：reference_images（数组，最多 16 张）> reference_image_url > reference_image（本地，自动传 CDN）
+    const rawRefs = Array.isArray(args.reference_images) && args.reference_images.length
+      ? args.reference_images
+      : [args.reference_image_url, args.reference_image].filter(Boolean)
+    const referenceImageUrls = []
+    const localRefPaths = []
+    for (const ref of rawRefs.slice(0, MAX_REFERENCE_IMAGES)) {
+      const value = String(ref || '').trim()
+      if (!value) continue
+      if (/^https?:\/\//i.test(value)) referenceImageUrls.push(value)
+      else {
+        referenceImageUrls.push(await uploadReferenceImage(value))
+        localRefPaths.push(value)
+      }
     }
 
     // 记录占位（失败也留痕）
@@ -123,7 +158,8 @@ export const ecomGenerateImageTool = {
       finalPromptUsedLock: Boolean(lockText),
       model, aspectRatio,
       campaign: args.campaign || '',
-      referenceImage: refPath || imageUrl || '',
+      referenceImages: localRefPaths.length ? localRefPaths : referenceImageUrls,
+      referenceImage: localRefPaths[0] || referenceImageUrls[0] || '',
       status: 'running',
       price: null,
       files: [],
@@ -132,25 +168,93 @@ export const ecomGenerateImageTool = {
     appendHistory(record)
 
     try {
-      const { taskId, price, urls } = await generateImage({
-        prompt: finalPrompt, model, aspectRatio, imageUrl, timeoutMs: (args.timeout || 420) * 1000,
+      const { taskId, price, urls, cliArgs, warnings } = await generateImage({
+        prompt: finalPrompt, model, aspectRatio, referenceImageUrls, timeoutMs: (args.timeout || 420) * 1000,
       })
       const baseName = record.ts.replace(/[-:]/g, '').replace('T', '-').slice(0, 15)
       const saved = await downloadImages(urls, IMAGES_DIR, baseName)
-      const updated = updateHistory(record.id, {
-        status: 'completed', taskId, price,
+
+      // 产出校验：请求比例 vs 实际像素，不达标直接判不合格，不许静默"完成"。
+      const checks = saved.map((s) => {
+        const size = imageSizeFromBuffer(readFileSync(s.file))
+        return { file: s.file.replace(/\\/g, '/').split('/').pop(), size, ratio: ratioMismatch(aspectRatio, size) }
+      })
+      const failedRatio = checks.filter((c) => c.ratio && !c.ratio.ok)
+      const ratioLine = checks.map((c) => c.size
+        ? `${c.file} ${c.size.width}×${c.size.height}${c.ratio ? `（要求 ${c.ratio.want}，实得 ${c.ratio.got}${c.ratio.ok ? ' ✓' : ' ✗'}）` : ''}`
+        : `${c.file} 尺寸无法识别`).join('\n')
+
+      updateHistory(record.id, {
+        status: failedRatio.length ? 'ratio_mismatch' : 'completed', taskId, price,
+        reviewState: 'awaiting', // 必须等用户验收，才允许出下一张
+        cliArgs: cliArgs.map((a, i) => (i === 1 ? `<prompt ${String(a).length} chars>` : a)),
+        referenceUrls: referenceImageUrls,
+        sizeChecks: checks.map((c) => ({ file: c.file, ...(c.size || {}), ratio: c.ratio })),
+        warnings,
         files: saved.map((s) => ({ file: s.file.replace(/\\/g, '/').split('/').pop(), url: s.url })),
         urls,
       })
       const fileList = saved.map((s) => s.file).join('\n')
+      const warnLine = warnings.length ? `\n⚠️ ${warnings.join('\n⚠️ ')}` : ''
+      if (failedRatio.length) {
+        return result(false,
+          `生成完成但**比例不符**（消耗 ${price ?? '未知'} 积分），已判不合格，请勿直接使用：\n${ratioLine}${warnLine}`,
+          fileList)
+      }
       return result(true,
-        `生成完成，消耗积分 ${price ?? '未知'}，已保存 ${saved.length} 张图到 ${DATA_DIR} 的 images/ 目录（历史记录 ${record.id}）。用户可在侧栏「电商视觉」面板的画廊查看。` +
-        (lockText ? '\n已自动注入 Campaign Style Lock。' : ''),
+        `生成完成，消耗积分 ${price ?? '未知'}，已保存 ${saved.length} 张图到 ${DATA_DIR} 的 images/ 目录（历史记录 ${record.id}）。` +
+        `\n参考图 ${referenceImageUrls.length} 张已随请求提交（${REF_PARAM}）。尺寸核验：\n${ratioLine}` +
+        `\n⚠️ 尺寸合格 ≠ 内容合格：请按 6 条硬检查逐项比对参考图（产品一致性/物理落地/透视/占比/色彩/无多余标注），再决定是否交付。` +
+        (lockText ? '\n已自动注入 Campaign Style Lock。' : '') + warnLine,
         fileList)
     } catch (err) {
-      updateHistory(record.id, { status: 'failed', error: String(err?.message || err).slice(0, 500) })
+      updateHistory(record.id, { status: 'failed', error: String(err?.message || err).slice(0, 800) })
       throw err
     }
+    } finally {
+      lock.release()
+    }
+  },
+}
+
+// ---------------------------------------------------------------------------
+// 工具 1.5：ecom_review_image —— 一次一张的验收闸门（没验收就出不了下一张）
+// ---------------------------------------------------------------------------
+export const ecomReviewImageTool = {
+  name: 'ecom_review_image',
+  description:
+    '记录一张已生成图片的验收结论，是"一次只出一张"流程的闸门：不调用它，下一次 ecom_generate_image 会被直接拒绝。' +
+    '先把图给用户看 + 贴 6 项自检，再按用户意见记录 approve 或 reject。',
+  parameters: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['id', 'verdict'],
+    properties: {
+      id: str('待验收的历史记录 id（gen-… ，见 ecom_generate_image 回执或 ecom_history list）'),
+      verdict: str('approve = 用户确认可用；reject = 用户否决/需重出', { enum: ['approve', 'reject'] }),
+      notes: str('可选：用户原话或不合格原因（reject 时必填，写清哪一项不过）'),
+      checks: {
+        type: 'object',
+        description: '6 项自检，approve 时必须全部为 true',
+        additionalProperties: false,
+        properties: Object.fromEntries(REVIEW_CHECK_KEYS.map((k) => [k, { type: 'boolean', description: CHECK_LABELS[k] }])),
+      },
+    },
+  },
+  output: OUTPUT,
+  async execute(args) {
+    check(args, this.parameters)
+    if (args.verdict === 'reject' && !String(args.notes || '').trim()) {
+      throw new Error('reject 必须写 notes：哪一项不过（产品一致性/物理落地/透视/占比/色彩/多余标注）。')
+    }
+    const res = recordReview(args.id, { verdict: args.verdict, checks: args.checks || {}, notes: args.notes || '' })
+    if (!res.ok) throw new Error(res.error)
+    const left = pendingReview()
+    return result(true,
+      args.verdict === 'approve'
+        ? `已验收通过 ${args.id}，现在可以出下一张（一次仍然只能一张）。`
+        : `已记录否决 ${args.id}：${args.notes}。改 Prompt 后可以重出，但要等用户明确说重出。`,
+      left ? `注意：仍有待验收记录 ${left.id}` : '当前没有待验收记录。')
   },
 }
 
@@ -189,7 +293,9 @@ export const ecomHistoryTool = {
     if (!list.length) return result(true, '还没有生图历史。对话里说「生成一张电商主图」试试。')
     const lines = list.map((r) => {
       const files = (r.files || []).map((f) => f.file).join(', ')
-      return `- ${r.ts} [${r.status}] ${r.title || r.prompt.slice(0, 60)} · ${r.model} · ${r.aspectRatio} · ${r.price ?? '-'} 积分${files ? ` · ${files}` : ''} · id=${r.id}`
+      const label = String(r.title || r.prompt || '未命名')
+      const review = r.reviewState === 'awaiting' ? ' · ⏳待验收' : ''
+      return `- ${r.ts} [${r.status}] ${label.slice(0, 60)} · ${r.model || '-'} · ${r.aspectRatio || '-'} · ${r.price ?? '-'} 积分${files ? ` · ${files}` : ''}${review} · id=${r.id}`
     })
     return result(true, `共 ${readHistory().length} 条历史，最近 ${list.length} 条：`, lines.join('\n'))
   },
@@ -302,6 +408,7 @@ export function apply(ctx) {
   skillDirsRef.dirs = skillDirs
 
   ctx.effect(() => ctx.tools.register(ecomGenerateImageTool), `${name}: tool generate`)
+  ctx.effect(() => ctx.tools.register(ecomReviewImageTool), `${name}: tool review`)
   ctx.effect(() => ctx.tools.register(ecomHistoryTool), `${name}: tool history`)
   ctx.effect(() => ctx.tools.register(ecomStyleLockTool), `${name}: tool stylelock`)
   ctx.effect(() => ctx.tools.register(ecomTemplateTool), `${name}: tool template`)

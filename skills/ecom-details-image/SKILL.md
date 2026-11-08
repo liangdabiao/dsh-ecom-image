@@ -62,7 +62,7 @@ python3 scripts/generate_image.py --prompt-file prompt.txt --output-dir outputs
 python3 scripts/generate_image.py --env-file .env --prompt-file prompt.txt
 ```
 
-**参考图片**：如果用户提供了本地产品照片路径，使用 `--image` 参数传入；脚本会先 `apiz upload` 上传到 apiz CDN 换取公网 URL，再走图生图，这对保证产品外观准确非常有效。已有公网 URL 时用 `--image-url` 直接传入。
+**参考图片**：如果用户提供了本地产品照片路径，使用 `--image` 参数传入；脚本会先 `apiz upload` 上传到 apiz CDN 换取公网 URL，再走图生图，这对保证产品外观准确非常有效。已有公网 URL 时用 `--image-url` 直接传入。脚本内部把参考图映射成 apiz 的 `--params '{"reference_image_urls":[...]}'`（1–16 张），**绝不要**直接手写 `apiz generate --image-url`，那个参数会被网关丢弃。
 
 **注意**：生图会消耗 apiz 账户积分（`apiz account balance` 查看）。批量出图前先把 Image Pack Plan 报给用户确认。
 

@@ -11,7 +11,7 @@ DeepSeek Harness（dsh）插件：**电商图片生成 + 管理工作台**。不
 
 | 能力 | 说明 |
 |---|---|
-| `ecom_generate_image` | apiz CLI 直接生图：支持参考图上传走图生图（保证产品外观准确）、比例 1:1/16:9/9:16 等多种、传 `campaign` 自动注入 Style Lock。结果自动下载入档、入历史 |
+| `ecom_generate_image` | apiz CLI 直接生图：支持参考图上传走图生图（保证产品外观准确）、比例 1:1/16:9/9:16 等多种、传 `campaign` 自动注入 Style Lock。结果自动下载入档、入历史。参考图参数：`reference_image`（本地）/ `reference_image_url` / `reference_images`（数组，≤16），底层走 apiz 的 `--params {"reference_image_urls":[…]}` |
 | `ecom_style_lock` | Campaign Style Lock **持久化**：色板/冷暖调/字体/背景/光线/布局/图标风格整套锁定，多图一致性；set/get/list/delete/render |
 | `ecom_history` | 生图历史：Prompt、模型、比例、消耗积分、图片文件路径；list/get/clear |
 | `ecom_template` | 25 个场景模板查询：list/search（中英文关键词）/get 拿完整 prompt_template/variants/category_tips/examples |
