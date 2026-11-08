@@ -4,7 +4,7 @@ DeepSeek Harness（dsh）插件：**电商图片生成 + 管理工作台**。不
 
 技能方法论来自 [ecom-details-image](https://github.com/liangdabiao/ecom-details-image)（MIT，liangdabiao）。
 
-<img width="2346" height="1278" alt="image" src="https://github.com/user-attachments/assets/774fed50-d681-4e92-aa5a-6b3616814a49" />
+ <img width="1752" height="1065" alt="image" src="https://github.com/user-attachments/assets/26fff5eb-4ac7-45e2-a20a-619508bcbe50" />
 
 
 ## 装上以后有什么
