@@ -1,6 +1,6 @@
 ---
 name: ecom-details-image
-description: Create visual concepts, image-generation prompts, and optional AI-generated images for product hero images, marketing creatives, social posts, ads, ecommerce PDP visuals, and general visual design tasks. Use when the user asks for visual strategy, image prompt writing, product/marketing image direction, or direct text-to-image generation. In Codex environments use the built-in imagegen tool; elsewhere use the bundled script backed by the apiz CLI.
+description: Create visual concepts, image-generation prompts, and optional AI-generated images for product hero images, marketing creatives, social posts, ads, ecommerce PDP visuals, and general visual design tasks. Use when the user asks for visual strategy, image prompt writing, product/marketing image direction, or direct text-to-image generation. In Codex environments use the built-in imagegen tool; elsewhere use the bundled script, which prefers the dreamina-canvas CLI (Seedream 5.5) and falls back to the apiz CLI.
 ---
 
 # ecom-details-image Skill
@@ -32,9 +32,37 @@ description: Create visual concepts, image-generation prompts, and optional AI-g
 4. 把返回的图片文件记录为 Generated Files；建议将文件移动或复制到 `generated-images/<产品slug>/` 目录，与本 Skill 的输出习惯保持一致。
 5. imagegen 不可用或调用失败时，回退到通道 B。
 
-### 通道 B：非 Codex 环境 → apiz CLI 脚本
+### 通道 B：非 Codex 环境 → 即梦 dreamina-canvas CLI（默认优先）
 
-claude code / OpenClaw 等其他环境使用 `scripts/generate_image.py`，脚本内部调用 **apiz CLI**（https://apiz.ai）提交生成任务并下载结果，不再直连任何 HTTP API。
+claude code / OpenClaw 等其他环境使用 `scripts/generate_image.py`，默认（`--channel auto`）优先走**即梦通道**：脚本转交 `scripts/generate_image_dreamina.py`，内部调用 **dreamina-canvas CLI** 在即梦画布内生成，默认模型 **Seedream 5.5**。
+
+前置条件（本机通常已就绪）：
+
+1. 已安装 dreamina-canvas CLI（`dreamina-canvas --version` 可执行）。
+2. 已登录：`dreamina-canvas auth login` 完成 OAuth。认证完全由 CLI 处理，脚本不接触密钥。
+
+可选配置（通过 `.env` 或环境变量，全部可省略）：
+
+```dotenv
+DREAMINA_IMAGE_MODEL=seedream_5.5
+# DREAMINA_CANVAS_ID=<画布UUID>   # 不设置时用当前画布或自动创建 ecom-details-image 画布
+DREAMINA_RESOLUTION=2K
+DREAMINA_CREDIT_CEILING=10
+# DREAMINA_BIN=C:\path\to\dreamina-canvas.exe
+```
+
+能力要点：
+
+- 模型用 `dreamina-canvas model list --type image` 实时查询；Seedream 5.5 支持文生图/图生图、`1:1/3:4/4:3/16:9/9:16/2:3/3:2/21:9`、`1.5K/2K`、单节点 1-8 张、参考图最多 10 张、Prompt 上限 5000 字符。
+- 不支持的比例如 `4:5` 脚本会自动换算到最接近的支持比例（`3:4`）并说明。
+- **多参考图是即梦通道的优势**：用户提供了多角度产品图时，用多个 `--image` 传入（最多 10 张），产品一致性显著更好。
+- 计费按即梦积分：Seedream 5.5 实测 2K 约 **6 积分/张**（`dreamina-canvas auth account` 查余额）。批量出图前先报预计积分消耗并经用户确认。
+- 国内版产物左上角带「AI生成」合规水印，交付前提醒用户。
+- 即梦 CLI 未安装或未登录时回退通道 C，不要阻塞：返回完整 Prompt 包和 `dreamina-canvas auth login` 指引。
+
+### 通道 C：非 Codex 环境 → apiz CLI（回退）
+
+即梦 CLI 不可用，或显式 `--channel apiz` / `ECOM_IMAGE_CHANNEL=apiz` 时，脚本内部调用 **apiz CLI**（https://apiz.ai）提交生成任务并下载结果，不再直连任何 HTTP API。
 
 前置条件（本机通常已就绪）：
 
@@ -62,7 +90,7 @@ python3 scripts/generate_image.py --prompt-file prompt.txt --output-dir outputs
 python3 scripts/generate_image.py --env-file .env --prompt-file prompt.txt
 ```
 
-**参考图片**：如果用户提供了本地产品照片路径，使用 `--image` 参数传入；脚本会先 `apiz upload` 上传到 apiz CDN 换取公网 URL，再走图生图，这对保证产品外观准确非常有效。已有公网 URL 时用 `--image-url` 直接传入。脚本内部把参考图映射成 apiz 的 `--params '{"reference_image_urls":[...]}'`（1–16 张），**绝不要**直接手写 `apiz generate --image-url`，那个参数会被网关丢弃。
+**参考图片**：如果用户提供了本地产品照片路径，使用 `--image` 参数传入；脚本会先 `apiz upload` 上传到 apiz CDN 换取公网 URL，再走图生图，这对保证产品外观准确非常有效。已有公网 URL 时用 `--image-url` 直接传入。
 
 **注意**：生图会消耗 apiz 账户积分（`apiz account balance` 查看）。批量出图前先把 Image Pack Plan 报给用户确认。
 
@@ -80,7 +108,7 @@ python3 scripts/generate_image.py --env-file .env --prompt-file prompt.txt
 6. 写出可执行图片 Prompt（**保持简洁**，见下方 Prompt 精简原则）；多图任务必须把同一段 Campaign Style Lock 原样放进每张 Prompt。
 7. 如果任务是商品图、详情页图或营销图，先做转化驱动力诊断。
 8. 如果用户要求电商详情页、PDP、主图堆栈或整套商品图，默认输出 **5 张主图 + 7-9 张详情页图片** 的图片包。
-9. 如果用户要求直接出图，按**生图通道判断**执行：Codex 环境用内置 imagegen；其他环境调用 `scripts/generate_image.py`（apiz CLI）。用户提供了参考产品图时，Codex 传给 imagegen，脚本通道传 `--image`。
+9. 如果用户要求直接出图，按**生图通道判断**执行：Codex 环境用内置 imagegen；其他环境调用 `scripts/generate_image.py`（默认即梦 Seedream 5.5，回退 apiz）。用户提供了参考产品图时，Codex 传给 imagegen，脚本通道传 `--image`（即梦支持多张 `--image` 重复传入）。
 10. 返回 Prompt、生成文件路径和关键假设。
 
 ---
@@ -541,7 +569,7 @@ Clean two-column layout. Product occupies 35%. Whitespace 48%+.
 5. 每张独立 Prompt 必须以同一段 Campaign Style Lock 开头。
 6. 输出目录用产品英文 slug，例如 `generated-images/laundry-detergent-pods-pdp/`。
 7. 如果模型不支持某个比例，改用最接近的支持比例，并在结果中说明。
-8. 如果 apiz CLI 不可用（未安装/未登录）且不在 Codex 环境，只输出完整 Prompt 包，不调用脚本。
+8. 如果即梦 CLI 和 apiz CLI 均不可用（未安装/未登录）且不在 Codex 环境，只输出完整 Prompt 包，不调用脚本。
 9. 不要虚构认证、实验数据、评分、销量、真实评价或品牌授权。
 
 ---
@@ -551,12 +579,12 @@ Clean two-column layout. Product occupies 35%. Whitespace 48%+.
 当用户要求生成图片：
 
 1. 先输出最终 Prompt。
-2. 按**生图通道判断**选择通道：Codex 环境直接调用内置 imagegen；其他环境运行 `scripts/generate_image.py`（内部走 apiz CLI）。
+2. 按**生图通道判断**选择通道：Codex 环境直接调用内置 imagegen；其他环境运行 `scripts/generate_image.py`（默认走即梦 Seedream 5.5，回退 apiz）。
 3. 短 Prompt 用 `--prompt`，长 Prompt 用 `--prompt-file`。
 4. 根据平台选择 `--size`（比例格式），没有要求时默认 `1:1`。
 5. 只有用户指定目录时才使用 `--output-dir`，否则使用 `generated-images/`。
-6. 如果 apiz CLI 未安装或未登录，不要调用脚本；返回 Prompt 和 `apiz auth login` 指引。
-7. 批量出图前先报 Image Pack Plan 和预计积分消耗，经用户确认再执行。
+6. 如果即梦和 apiz CLI 均未安装或未登录，不要调用脚本；返回 Prompt 和登录指引。
+7. 批量出图前先报 Image Pack Plan 和预计积分消耗（即梦 Seedream 5.5 约 6 积分/张，apiz 见 `apiz account balance`），经用户确认再执行。
 
 命令形状（非 Codex 环境）：
 
@@ -564,15 +592,17 @@ Clean two-column layout. Product occupies 35%. Whitespace 48%+.
 python3 scripts/generate_image.py --prompt "..." --size 1:1
 ```
 
-脚本支持：
+脚本支持（即梦 / apiz 通用）：
 
+- `--channel`：`auto / dreamina / apiz`，默认 `auto`（优先即梦，回退 apiz；可用 `ECOM_IMAGE_CHANNEL` 覆盖）
 - `--prompt` / `--prompt-file`
 - `--output-dir`
-- `--size`：比例格式（`1:1`、`16:9`、`2:3`、`4:5` 等，兼容 `1024x1024` 像素写法）
-- `--model`：apiz 图片模型 id，默认 `apiz/gpt-image-2.5-flare`
-- `--image`：本地参考产品图片路径（自动上传 apiz CDN）；`--image-url`：参考图公网 URL
-- `--timeout`：单任务等待上限秒数，默认 `420`
+- `--size`：比例格式（`1:1`、`16:9`、`2:3` 等，兼容 `1024x1024` 像素写法；即梦不支持的比例自动换算）
+- `--model`：即梦默认 `seedream_5.5`，apiz 默认 `apiz/gpt-image-2.5-flare`
+- `--image`：本地参考产品图片路径（即梦可重复传入最多 10 张）；apiz 另支持 `--image-url`
+- `--timeout`：单任务等待上限秒数，默认即梦 600 / apiz 420
 - `--format`：保存格式的默认扩展名，默认 `png`
+- 即梦通道额外参数：`--count`（单节点 1-8 张）、`--resolution`（`1.5K/2K`）、`--canvas-id`、`--credit-ceiling`
 
 ---
 
@@ -588,7 +618,7 @@ python3 scripts/generate_image.py --prompt "..." --size 1:1
 - 证据缺失时不虚构效果、认证或数据。
 - 图片内文字短且必要。
 - UGC / 直播 / 社媒场景已应用 anti-AI 技巧（模板中的 `anti_ai_tips` 字段）。
-- 已按**生图通道判断**选择通道：Codex 环境用内置 imagegen，其他环境用 `scripts/generate_image.py`（apiz CLI）。
+- 已按**生图通道判断**选择通道：Codex 环境用内置 imagegen，其他环境用 `scripts/generate_image.py`（默认即梦，回退 apiz）。
 - 如有用户参考图片，Codex 通道已传给 imagegen，脚本通道已传入 `--image` / `--image-url` 参数。
 - 负面约束覆盖常见失败点。
 - 输出和文件里没有 API key 或私密凭据。

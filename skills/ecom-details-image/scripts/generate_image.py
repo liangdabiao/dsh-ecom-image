@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
-"""图像生成脚本，通过 apiz CLI（https://apiz.ai）提交生成任务并下载结果。
+"""图像生成脚本，通过 apiz CLI（https://apiz.ai）或即梦 dreamina-canvas CLI 提交生成任务并下载结果。
 
 仅当运行环境没有 agent 内置 imagegen 工具时才使用本脚本（Codex 环境请直接使用
-agent 内置 imagegen）。本脚本不直接调用 HTTP API，而是调用已安装并登录好的
-apiz CLI，认证由 CLI 自行处理（`apiz auth login` 或 APIZ_API_KEY 环境变量）。
+agent 内置 imagegen）。本脚本不直接调用 HTTP API，而是调用已安装并登录好的 CLI，
+认证由 CLI 自行处理（apiz: `apiz auth login` / APIZ_API_KEY；即梦: OAuth 登录）。
 
-流程：
+通道选择（--channel 或 ECOM_IMAGE_CHANNEL，默认 auto）：
+- dreamina（即梦）：默认优先。调用 scripts/generate_image_dreamina.py，
+  走 dreamina-canvas CLI（默认模型 Seedream 5.5，画布内生成，按积分计费）。
+- apiz：即梦 CLI 不可用或显式指定时使用。流程：
   1. 本地参考图 → `apiz upload` 换取公网 URL
   2. `apiz generate <prompt> --model <model> --aspect-ratio <ratio> --wait --json`
   3. 解析任务 JSON，下载 result.images[].url 到输出目录
 
 配置（均可省略）：
-- APIZ_IMAGE_MODEL: 图片模型，默认 apiz/gpt-image-2.5-flare（兼容 IMG_MODEL、OPENAI_IMAGE_MODEL）
+- ECOM_IMAGE_CHANNEL: 生图通道 auto / dreamina / apiz（默认 auto，优先即梦）
+- DREAMINA_*: 即梦通道配置，详见 scripts/generate_image_dreamina.py
+- APIZ_IMAGE_MODEL: apiz 图片模型，默认 apiz/gpt-image-2.5-flare（兼容 IMG_MODEL、OPENAI_IMAGE_MODEL）
 - APIZ_API_KEY: 可选，apiz CLI 的 key；已 `apiz auth login` 时无需设置（兼容 IMG_API_KEY）
 - APIZ_BASE_URL: 可选，CLI 后端地址（兼容 IMG_BASE_URL）
-- APIZ_BIN: 可选，apiz 可执行文件路径，默认从 PATH 查找
+- APIZ_BIN / DREAMINA_BIN: 可选，CLI 可执行文件路径，默认从 PATH 查找
 """
 
 from __future__ import annotations
@@ -142,6 +147,42 @@ def locate_apiz() -> str:
     return found
 
 
+def locate_dreamina() -> str | None:
+    candidate = resolve_env("DREAMINA_BIN")
+    if candidate:
+        return candidate if Path(candidate).is_file() else None
+    return shutil.which("dreamina-canvas") or shutil.which("dreamina-canvas.exe")
+
+
+def dispatch_to_dreamina() -> None:
+    """进程内加载即梦通道脚本执行（参数面是 apiz 脚本的超集），剔除 --channel。"""
+    script = Path(__file__).with_name("generate_image_dreamina.py")
+    if not script.is_file():
+        fail("找不到 scripts/generate_image_dreamina.py，无法走即梦通道。")
+    passthrough: list[str] = []
+    skip_next = False
+    for arg in sys.argv[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--channel":
+            skip_next = True
+            continue
+        if arg.startswith("--channel="):
+            continue
+        passthrough.append(arg)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("generate_image_dreamina", str(script))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    sys.argv = [str(script), *passthrough]
+    try:
+        module.main()
+    except SystemExit as exc:
+        raise SystemExit(exc.code) from None
+    raise SystemExit(0)
+
+
 def size_to_ratio(size: str) -> str:
     if ":" in size:
         return size
@@ -204,10 +245,8 @@ def build_generate_args(prompt: str, model: str, ratio: str,
         "generate", prompt, "--model", model, "--aspect-ratio", ratio,
         "--wait", "--wait-timeout", f"{wait_timeout}s",
     ]
-    # apiz 的图生图参数是 --params '{"reference_image_urls":[...]}'（1–16 张公网 URL）。
-    # 注意：不要用 --image-url，网关会当成未知参数丢弃，静默退化成文生图。
     if image_url:
-        cli_args += ["--params", json.dumps({"reference_image_urls": [image_url]}, ensure_ascii=False)]
+        cli_args += ["--image-url", image_url]
     return cli_args
 
 
@@ -303,6 +342,9 @@ def parse_args():
                         help="单个生成任务等待上限秒数，默认 420。")
     parser.add_argument("--format", choices=("png", "jpeg", "webp"), default="png",
                         help="保存格式的默认扩展名（实际以后缀/类型为准），默认 png。")
+    parser.add_argument("--channel", choices=("auto", "dreamina", "apiz"), default=None,
+                        help="生图通道：auto 默认优先即梦（dreamina-canvas CLI）并回退 apiz；"
+                             "可用 ECOM_IMAGE_CHANNEL 环境变量覆盖。")
     return parser.parse_args()
 
 
@@ -310,6 +352,19 @@ def main() -> None:
     args = parse_args()
     env_file = Path(args.env_file) if args.env_file else find_default_env_file()
     load_env_file(env_file)
+
+    channel = args.channel or resolve_env("ECOM_IMAGE_CHANNEL") or "auto"
+    if channel in ("auto", "dreamina"):
+        dreamina_bin = locate_dreamina()
+        if dreamina_bin:
+            if channel == "auto":
+                log("[channel] 未指定通道，默认走即梦（Seedream 5.5）。用 --channel apiz 切回 apiz。")
+            dispatch_to_dreamina()
+        elif channel == "dreamina":
+            fail("找不到 dreamina-canvas CLI，无法走即梦通道。请安装或用 --channel apiz。")
+        else:
+            log("[channel] 即梦 CLI 不可用，回退 apiz 通道。")
+
     prompt = read_prompt(args)
 
     apiz_bin = locate_apiz()

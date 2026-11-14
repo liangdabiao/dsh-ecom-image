@@ -1,0 +1,10 @@
+{
+  "source": "D:\\new-image-project\\ecom-details-image",
+  "syncedAt": "2026-11-14T05:27:46.786Z",
+  "templates": 25,
+  "caseImages": 30,
+  "scripts": [
+    "generate_image.py",
+    "generate_image_dreamina.py"
+  ]
+}

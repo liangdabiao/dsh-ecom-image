@@ -242,14 +242,16 @@ await test('skills: provider list/get 带 addendum 工具指引', async () => {
 // ── host.js：工具对象结构 + 校验 + 全链路（不打 apiz 网络）──
 const host = await import('../src/host.js')
 
-await test('host: 5 个工具注册齐全、schema additionalProperties:false', async () => {
+await test('host: 6 个工具注册齐全、schema additionalProperties:false', async () => {
   assert.equal(host.name, 'ecom-image')
-  for (const tool of [host.ecomGenerateImageTool, host.ecomReviewImageTool, host.ecomHistoryTool, host.ecomStyleLockTool, host.ecomTemplateTool]) {
+  for (const tool of [host.ecomGenerateImageTool, host.ecomReviewImageTool, host.ecomHistoryTool, host.ecomStyleLockTool, host.ecomTemplateTool, host.ecomModelsTool]) {
     assert.equal(tool.output.schema.additionalProperties, false)
     assert.equal(tool.parameters.additionalProperties, false)
     assert.ok(tool.description.length > 30)
   }
   assert.equal(host.ecomGenerateImageTool.parameters.required[0], 'prompt')
+  // 双通道：channel 参数必须存在且枚举含 auto / dreamina / apiz
+  assert.deepEqual(host.ecomGenerateImageTool.parameters.properties.channel.enum, ['auto', 'dreamina', 'apiz'])
 })
 
 await test('host: check 未知参数/坏枚举拒绝', async () => {
@@ -296,6 +298,28 @@ await test('host: ecom_generate_image campaign 不存在时报错并指引', asy
     /先用 ecom_style_lock/)
 })
 
+await test('host: apply(ctx, config) 把宿主解析后的配置注入工具/面板', async () => {
+  const tools = []
+  let routeCount = 0
+  const ctx = {
+    effect: (fn) => { fn() },
+    tools: { register: (t) => { tools.push(t.name); return () => {} } },
+    skills: { registerProvider: () => () => {} },
+    webServer: { register: () => { routeCount++; return () => {} } },
+    get: () => ({ requestRejection: () => false }),
+  }
+  host.apply(ctx, { defaultChannel: 'apiz', dreaminaModel: 'seedream_5.0_pro', dreaminaCreditCeiling: 20 })
+  assert.deepEqual(tools.sort(), ['ecom_generate_image', 'ecom_history', 'ecom_models', 'ecom_review_image', 'ecom_style_lock', 'ecom_template'])
+  assert.equal(routeCount, 1)
+  assert.equal(host.configRef.config.defaultChannel, 'apiz')
+  assert.equal(host.configRef.config.dreaminaModel, 'seedream_5.0_pro')
+  // 通道默认值跟着配置走
+  const { channelDefs } = await import('../lib/channels.js')
+  assert.equal(channelDefs(host.configRef.config).dreamina.defaultModel, 'seedream_5.0_pro')
+  // 复位，避免影响后续「未注入 skillDirs」用例
+  host.skillDirsRef.dirs = []
+})
+
 await test('host: ecom_template 在未注入 skillDirs 时安全降级', async () => {
   const list = await host.ecomTemplateTool.execute({ action: 'list' })
   assert.equal(list.ok, true)
@@ -303,7 +327,137 @@ await test('host: ecom_template 在未注入 skillDirs 时安全降级', async (
   assert.equal(tpl.ok, false) // 空目录 → 无匹配
 })
 
-// ── api.js：鉴权深度防御 ───────────
+// ── dreamina.js：比例换算 / 参数构造 / Prompt 脱敏（不调 CLI）──
+const dreamina = await import('../lib/dreamina.js')
+
+await test('dreamina: 支持比例原样保留，4:5 换算成 3:4', async () => {
+  assert.deepEqual(dreamina.dreaminaRatio('1:1'), { ratio: '1:1', remappedFrom: '' })
+  const r = dreamina.dreaminaRatio('4:5')
+  assert.equal(r.ratio, '3:4')
+  assert.equal(r.remappedFrom, '4:5')
+  assert.match(r.note, /换算/)
+  const odd = dreamina.dreaminaRatio('7:3')
+  assert.equal(odd.ratio, '1:1')
+  assert.ok(odd.note)
+  // 模型自己支持 4:5 时不该被改写
+  assert.deepEqual(dreamina.dreaminaRatio('4:5', ['1:1', '3:4', '4:5']), { ratio: '4:5', remappedFrom: '' })
+  // 换算目标不在模型支持列表里 → 回退到 1:1 并说明
+  const fb = dreamina.dreaminaRatio('5:4', ['1:1', '3:4'])
+  assert.equal(fb.ratio, '1:1')
+  assert.match(fb.note, /回退/)
+})
+
+await test('dreamina: buildDreaminaNodeArgs —— t2i/i2i、count 恒为 1、带积分上限', async () => {
+  const t2i = dreamina.buildDreaminaNodeArgs({ projectId: 'p1', prompt: 'hello', model: 'seedream_5.5', ratio: '1:1' })
+  assert.ok(t2i.includes('node') && t2i.includes('create') && t2i.includes('image'))
+  assert.equal(t2i[t2i.indexOf('--mode') + 1], 't2i')
+  assert.equal(t2i[t2i.indexOf('--count') + 1], '1')
+  assert.equal(t2i[t2i.indexOf('--resolution') + 1], '2K')
+  assert.ok(t2i.includes('--run') && t2i.includes('--wait') && t2i.includes('--yes'))
+  const i2i = dreamina.buildDreaminaNodeArgs({ projectId: 'p1', prompt: 'hi', ratio: '3:4', referenceIds: ['r1', 'r2'], creditCeiling: 8 })
+  assert.equal(i2i[i2i.indexOf('--mode') + 1], 'i2i')
+  assert.equal(i2i.filter((a) => a === '--ref').length, 2)
+  assert.equal(i2i[i2i.indexOf('--credit-ceiling') + 1], '8')
+  assert.throws(() => dreamina.buildDreaminaNodeArgs({ projectId: '', prompt: 'x' }), /projectId/)
+  assert.throws(() => dreamina.buildDreaminaNodeArgs({ projectId: 'p', prompt: '  ' }), /prompt/)
+})
+
+await test('dreamina: maskPromptArg 不把整段 Prompt 写进日志', async () => {
+  const args = dreamina.maskPromptArg(['node', 'create', 'image', '--prompt', 'a'.repeat(500), '--ratio', '1:1'])
+  assert.ok(args.some((a) => a === '<prompt 500 chars>'))
+  assert.ok(!args.includes('a'.repeat(500)))
+})
+
+// ── channels.js：渠道定义（不探测 CLI）───────────────────────
+const channels = await import('../lib/channels.js')
+
+await test('channels: 两个通道定义 + 默认模型/比例/参考图上限', () => {
+  const defs = channels.channelDefs({})
+  assert.deepEqual(Object.keys(defs).sort(), ['apiz', 'dreamina'])
+  assert.equal(defs.dreamina.defaultModel, 'seedream_5.5')
+  assert.equal(defs.dreamina.defaultResolution, '2K')
+  assert.equal(defs.dreamina.maxRefs, 10)
+  assert.ok(defs.dreamina.ratios.includes('3:4') && !defs.dreamina.ratios.includes('4:5'))
+  assert.equal(defs.apiz.maxRefs, 16)
+  assert.ok(defs.apiz.fallbackModels.some((m) => m.id === 'apiz/gpt-image-2.6-flare'))
+  assert.deepEqual(channels.CHANNEL_PREFERENCE, ['auto', 'dreamina', 'apiz'])
+  // Config 覆盖
+  const custom = channels.channelDefs({ dreaminaModel: 'seedream_5.0_pro', defaultModel: 'apiz/gpt-image-2.6-flare' })
+  assert.equal(custom.dreamina.defaultModel, 'seedream_5.0_pro')
+  assert.equal(custom.apiz.defaultModel, 'apiz/gpt-image-2.6-flare')
+})
+
+// ── cases.js / templates.js：案例图索引 ─────────────────────
+const cases = await import('../lib/cases.js')
+
+await test('cases: 30 张案例图分两组（PDP 13 + 模板轮测 17）', () => {
+  const data = cases.listCases(SKILL_DIR)
+  const pdp = data.groups.find((g) => g.id === 'pdp')
+  const tpl = data.groups.find((g) => g.id === 'templates')
+  assert.equal(pdp.items.length, 13)
+  assert.equal(tpl.items.length, 17)
+  assert.ok(pdp.items.every((i) => i.image && i.label))
+  // 每个案例都有对应 Prompt
+  assert.ok(pdp.items.filter((i) => i.prompt.text).length >= 13)
+  assert.ok(tpl.items.every((i) => i.prompt.text))
+  assert.ok(tpl.items.some((i) => i.note.includes('可用')))
+})
+
+await test('cases: 模板→案例图映射（flat-lay 用 t03，hero-image 用白底 Packshot 兜底）', () => {
+  const data = cases.listCases(SKILL_DIR)
+  assert.equal(data.byTemplate['flat-lay'], 'templates/t03-flat-lay.jpg')
+  assert.equal(data.byTemplate['hero-image'], 'hero-01-packshot.jpg')
+  assert.equal(data.byTemplate['infographic'], 'detail-04-benefits.jpg')
+})
+
+await test('cases: safeCaseImage 拒绝路径穿越与非图片', () => {
+  assert.equal(cases.safeCaseImage(SKILL_DIR, '../SKILL.md'), null)
+  assert.equal(cases.safeCaseImage(SKILL_DIR, 'C:/Windows/win.ini'), null)
+  assert.equal(cases.safeCaseImage(SKILL_DIR, 'hero-01-packshot.jpg/../../SKILL.md'), null)
+  assert.equal(cases.safeCaseImage(SKILL_DIR, 'hero-01-packshot.txt'), null)
+  assert.ok(cases.safeCaseImage(SKILL_DIR, 'hero-01-packshot.jpg'))
+  assert.ok(cases.safeCaseImage(SKILL_DIR, 'templates/t03-flat-lay.jpg'))
+})
+
+await test('templates: 带案例图/变体/参考图能力字段', () => {
+  const t = getTemplate([SKILL_DIR], 'flat-lay')
+  assert.equal(t.caseImage, 'templates/t03-flat-lay.jpg')
+  const list = listTemplates([SKILL_DIR])
+  assert.ok(list.filter((x) => x.caseImage).length >= 17)
+  assert.ok(list.every((x) => Array.isArray(x.variants)))
+  const hero = list.find((x) => x.id === 'hero-image')
+  assert.equal(hero.caseImage, 'hero-01-packshot.jpg')
+})
+
+// ── api.js：新增面板路由 ────────────────────────────────────
+await test('api: /api/case + /api/case-image 路由（含路径防护）', async () => {
+  const { registerApi } = await import('../lib/api.js')
+  const captured = []
+  let status = 0
+  const fakeRes = {
+    writeHead(code) { status = code; return this },
+    end(chunk) { if (chunk) captured.push(String(chunk)) },
+    // case-image 用流式响应
+    write(chunk) { captured.push(String(chunk)) },
+    on() { return this },
+    emit() { return this },
+  }
+  let handler = null
+  const fakeCtx = {
+    get: () => ({ requestRejection: () => false }),
+    webServer: { register: async ({ handler: h2 }) => { handler = h2 } },
+  }
+  await registerApi(fakeCtx, { skillDirs: [SKILL_DIR], configRef: { config: {} } })
+  await handler({ method: 'GET', url: '/ecom-image/api/case', headers: {} }, fakeRes)
+  const payload = JSON.parse(captured.at(-1))
+  assert.equal(payload.groups.length, 2)
+  await handler({ method: 'GET', url: '/ecom-image/api/case-image?file=..%2FSKILL.md', headers: {} }, fakeRes)
+  assert.equal(status, 404)
+  await handler({ method: 'GET', url: '/ecom-image/api/case-image?file=nope.jpg', headers: {} }, fakeRes)
+  assert.equal(status, 404)
+})
+
+
 await test('api: 无 connection 服务时放行（宿主 token 已把关）；服务在则执行其判定', async () => {
   const api = await import('../lib/api.js')
   const noService = { get: () => undefined }

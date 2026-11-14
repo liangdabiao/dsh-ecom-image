@@ -1,14 +1,23 @@
 // 电商视觉创作 · Host 半边（工具 + webServer + 技能提供方）。
-// 工具：ecom_generate_image（apiz CLI 生图）、ecom_history（生图历史）、
-//       ecom_style_lock（Campaign Style Lock 持久化）、ecom_template（25 模板查询）。
+// 工具：ecom_generate_image（即梦 / apiz 双通道生图）、ecom_review_image（验收闸门）、
+//       ecom_history（历史）、ecom_style_lock（Campaign Style Lock）、ecom_template（25 模板 + 案例图）、
+//       ecom_models（渠道与模型选择）。
 // 面板数据面：/ecom-image 前缀路由（lib/api.js），与工具共用 lib。
 import Schema from '@deepseek-ai/schemastery'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createSkillProvider } from '../lib/skills.js'
 import { registerApi } from '../lib/api.js'
-import { ensureDirs, readHistory, appendHistory, updateHistory, clearHistory, getStyleLock, setStyleLock, deleteStyleLock, readStyleLocks, renderLockText, pendingReview, acquireGenerateLock, recordReview, REVIEW_CHECK_KEYS, IMAGES_DIR, DATA_DIR } from '../lib/data.js'
-import { DEFAULT_MODEL, MAX_REFERENCE_IMAGES, REF_PARAM, setApizBin, uploadReferenceImage, generateImage, downloadImages, imageSizeFromBuffer, ratioMismatch } from '../lib/apiz.js'
+import {
+  ensureDirs, readHistory, appendHistory, updateHistory, clearHistory, getStyleLock, setStyleLock,
+  deleteStyleLock, readStyleLocks, renderLockText, pendingReview, acquireGenerateLock, recordReview,
+  REVIEW_CHECK_KEYS, IMAGES_DIR, DATA_DIR,
+} from '../lib/data.js'
+import { DEFAULT_MODEL, imageSizeFromBuffer, ratioMismatch } from '../lib/apiz.js'
+import { DREAMINA_DEFAULT_MODEL, DREAMINA_DEFAULT_RESOLUTION, DREAMINA_RATIOS } from '../lib/dreamina.js'
+import { generateOne } from '../lib/generate.js'
+import { CHANNEL_PREFERENCE, probeChannels } from '../lib/channels.js'
+import { listCases } from '../lib/cases.js'
 import { readFileSync } from 'node:fs'
 import { listTemplates, getTemplate, searchTemplates } from '../lib/templates.js'
 
@@ -17,7 +26,13 @@ export const name = 'ecom-image' // = cordis.patch.yml 的 id
 export const inject = ['tools', 'skills', 'webServer', 'connection']
 
 export const Config = Schema.object({
-  defaultModel: Schema.string().default(DEFAULT_MODEL).description('默认 apiz 图片模型 id（apiz models list 可查）'),
+  defaultChannel: Schema.union(['auto', 'dreamina', 'apiz']).default('auto').description('默认生图通道：auto=即梦优先，不可用回落 apiz'),
+  dreaminaModel: Schema.string().default(DREAMINA_DEFAULT_MODEL).description('即梦默认模型（dreamina-canvas model list --type image 可查）'),
+  dreaminaResolution: Schema.union(['1.5K', '2K']).default(DREAMINA_DEFAULT_RESOLUTION).description('即梦默认分辨率（2K 约 6 积分/张）'),
+  dreaminaCanvasId: Schema.string().default('').description('即梦画布 UUID（留空用当前画布，没有则自动建 ecom-details-image 画布）'),
+  dreaminaCreditCeiling: Schema.number().default(10).description('即梦单张积分上限（防超支）'),
+  dreaminaBin: Schema.string().default('').description('dreamina-canvas CLI 路径（留空从 PATH 查找）'),
+  defaultModel: Schema.string().default(DEFAULT_MODEL).description('apiz 默认图片模型 id'),
   apizBin: Schema.string().default('').description('apiz CLI 可执行文件路径（留空自动从 PATH 查找）'),
 })
 
@@ -71,16 +86,17 @@ const CHECK_LABELS = {
 }
 
 // ---------------------------------------------------------------------------
-// 工具 1：ecom_generate_image —— apiz CLI 生图 + 自动入历史 + 可挂 Style Lock
+// 工具 1：ecom_generate_image —— 即梦 / apiz 双通道生图 + 自动入历史 + 可挂 Style Lock
 // ---------------------------------------------------------------------------
 export const ecomGenerateImageTool = {
   name: 'ecom_generate_image',
   description:
-    '用 apiz CLI 直接生成电商图片——**一次只出一张**。出图后必须立刻把图和 6 项自检结果发给用户，' +
-    '并用 ecom_review_image 记录验收结论；有未验收的记录时本工具会直接拒绝开新任务（防批量烧钱）。' +
-    '要锁住产品外观一致性，必须传参考图：reference_image（本地绝对路径，自动上传 CDN）/ reference_image_url / reference_images（数组，最多 16 张）。' +
+    '用即梦 dreamina-canvas（Seedream 5.5，默认）或 apiz CLI（GPT Image 2.6/2.5、Nano Banana 等）生成电商图片——**一次只出一张**。' +
+    '出图后必须立刻把图和 6 项自检结果发给用户，并用 ecom_review_image 记录验收结论；有未验收的记录时本工具会直接拒绝开新任务（防批量烧钱）。' +
+    'channel 选择通道（auto=即梦优先、不可用回落 apiz），model 选择具体模型（先用 ecom_models list 看可用模型）。' +
+    '要锁住产品外观一致性，必须传参考图：reference_image（本地绝对路径）/ reference_image_url / reference_images（数组，即梦最多 10 张、apiz 最多 16 张）。' +
     'prompt 应为完整的英文生图 Prompt；如有多图任务，先用 ecom_style_lock 建立并锁定 Campaign Style Lock，' +
-    '再传 campaign 参数让每张图自动注入同一段一致性约束。需用户已安装 apiz CLI 并 auth login（消耗 apiz 积分）。',
+    '再传 campaign 参数让每张图自动注入同一段一致性约束。需用户已安装并登录对应 CLI（消耗积分）。',
   parameters: {
     type: 'object',
     additionalProperties: false,
@@ -89,21 +105,22 @@ export const ecomGenerateImageTool = {
       prompt: str('完整生图 Prompt（英文效果最佳）。传了 campaign 时无需再手写 Style Lock，会自动拼接'),
       title: str('可选：本张图的用途标注（如「保温杯-主图1」），会进历史记录'),
       campaign: str('可选：Campaign Style Lock 名称（先用 ecom_style_lock 的 set 建立），自动把锁定约束拼进 Prompt'),
-      size: str('可选：图片比例，默认 1:1。可选 16:9 / 9:16 / 2:3 / 3:4 / 4:5 / 21:9 等', { enum: ['1:1', '16:9', '9:16', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '1:2', '2:1', '21:9', '9:21'] }),
-      model: str('可选：apiz 图片模型 id，默认配置里的 defaultModel'),
-      reference_image: str('可选：本地参考产品图绝对路径，先上传 apiz CDN 再走图生图（保证产品外观准确）'),
-      reference_image_url: str('可选：参考图公网 URL（与 reference_image 二选一，URL 优先）'),
-      reference_images: arr('可选：多张参考图（本地路径或公网 URL 混合），最多 16 张；传了它则忽略上面两个单图参数'),
-      timeout: num('可选：单张生成等待上限秒数，默认 420'),
+      channel: str('可选：生图通道，默认按插件配置（通常 auto=即梦优先）', { enum: CHANNEL_PREFERENCE }),
+      model: str('可选：通道内的模型 id（即梦如 seedream_5.5 / seedream_5.0_pro；apiz 如 apiz/gpt-image-2.6-flare）。留空用通道默认'),
+      size: str('可选：图片比例，默认 1:1；即梦不支持的比例（如 4:5）会自动换算到最近比例并在回执里说明', { enum: ['1:1', '16:9', '9:16', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '1:2', '2:1', '21:9', '9:21'] }),
+      resolution: str('可选：分辨率（仅即梦通道），默认按配置；2K 约 6 积分/张', { enum: ['1.5K', '2K', '4K'] }),
+      reference_image: str('可选：本地参考产品图绝对路径（保证产品外观准确）'),
+      reference_image_url: str('可选：参考图公网 URL（与 reference_image 二选一，两张都传时按顺序都带上）'),
+      reference_images: arr('可选：多张参考图（本地路径或公网 URL 混合）；即梦最多 10 张、apiz 最多 16 张'),
+      timeout: num('可选：单张生成等待上限秒数，默认 420（即梦 600）'),
     },
   },
-  timeoutMs: 480_000,
+  timeoutMs: 900_000,
   output: OUTPUT,
   async execute(args) {
     check(args, this.parameters)
-    const cfg = configRef.config
+    const cfg = configRef.config || {}
     ensureDirs()
-    setApizBin(typeof cfg?.apizBin === 'string' ? cfg.apizBin : '')
 
     // ── 一次一张 · 闸门 1：上一张还没验收，先别出新的 ──
     const pending = pendingReview()
@@ -114,105 +131,108 @@ export const ecomGenerateImageTool = {
         `请先把这张图 + 6 项自检结果发给用户，再用 ecom_review_image 记录结论（verdict: approve / reject），之后才能出下一张。`)
     }
     // ── 一次一张 · 闸门 2：并发互斥（防我一次并行开好几张）──
-    const lock = acquireGenerateLock()
-    if (!lock.ok) throw new Error(`${lock.reason}。等这一张落盘并验收后再继续。`)
+    const gate = acquireGenerateLock()
+    if (!gate.ok) throw new Error(`${gate.reason}。等这一张落盘并验收后再继续。`)
     try {
-    const model = args.model || (typeof cfg?.defaultModel === 'string' && cfg.defaultModel) || DEFAULT_MODEL
-    const aspectRatio = args.size || '1:1'
+      const channel = args.channel || cfg.defaultChannel || 'auto'
+      const model = args.model || ''
+      const aspectRatio = args.size || '1:1'
 
-    // Campaign Style Lock 自动注入
-    let lock = null
-    if (args.campaign) {
-      lock = getStyleLock(args.campaign)
-      if (!lock) {
-        const names = Object.keys(readStyleLocks())
-        throw new Error(
-          `Style Lock「${args.campaign}」不存在。先用 ecom_style_lock 的 set 动作建立${names.length ? `；已有：${names.join('、')}` : '（当前还没有任何锁）'}。`)
+      // Campaign Style Lock 自动注入
+      let campaignLock = null
+      if (args.campaign) {
+        campaignLock = getStyleLock(args.campaign)
+        if (!campaignLock) {
+          const names = Object.keys(readStyleLocks())
+          throw new Error(
+            `Style Lock「${args.campaign}」不存在。先用 ecom_style_lock 的 set 动作建立${names.length ? `；已有：${names.join('、')}` : '（当前还没有任何锁）'}。`)
+        }
       }
-    }
-    const lockText = renderLockText(lock)
-    const finalPrompt = lockText ? `${args.prompt}\n\n${lockText}` : args.prompt
+      const lockText = renderLockText(campaignLock)
+      const finalPrompt = lockText ? `${args.prompt}\n\n${lockText}` : args.prompt
 
-    // 参考图收集：reference_images（数组，最多 16 张）> reference_image_url > reference_image（本地，自动传 CDN）
-    const rawRefs = Array.isArray(args.reference_images) && args.reference_images.length
-      ? args.reference_images
-      : [args.reference_image_url, args.reference_image].filter(Boolean)
-    const referenceImageUrls = []
-    const localRefPaths = []
-    for (const ref of rawRefs.slice(0, MAX_REFERENCE_IMAGES)) {
-      const value = String(ref || '').trim()
-      if (!value) continue
-      if (/^https?:\/\//i.test(value)) referenceImageUrls.push(value)
-      else {
-        referenceImageUrls.push(await uploadReferenceImage(value))
-        localRefPaths.push(value)
+      // 参考图收集：reference_images（数组）> reference_image_url > reference_image
+      const rawRefs = Array.isArray(args.reference_images) && args.reference_images.length
+        ? args.reference_images
+        : [args.reference_image_url, args.reference_image].filter(Boolean)
+      const referenceImages = rawRefs.map((r) => String(r || '').trim()).filter(Boolean)
+
+      // 记录占位（失败也留痕）
+      const record = {
+        id: `gen-${Date.now()}`,
+        ts: new Date().toISOString(),
+        title: args.title || '',
+        prompt: args.prompt,
+        finalPromptUsedLock: Boolean(lockText),
+        channel, model: model || '(通道默认)', aspectRatio,
+        campaign: args.campaign || '',
+        referenceImages,
+        referenceImage: referenceImages[0] || '',
+        status: 'running',
+        price: null,
+        files: [],
+        urls: [],
       }
-    }
+      appendHistory(record)
 
-    // 记录占位（失败也留痕）
-    const record = {
-      id: `gen-${Date.now()}`,
-      ts: new Date().toISOString(),
-      title: args.title || '',
-      prompt: args.prompt,
-      finalPromptUsedLock: Boolean(lockText),
-      model, aspectRatio,
-      campaign: args.campaign || '',
-      referenceImages: localRefPaths.length ? localRefPaths : referenceImageUrls,
-      referenceImage: localRefPaths[0] || referenceImageUrls[0] || '',
-      status: 'running',
-      price: null,
-      files: [],
-      urls: [],
-    }
-    appendHistory(record)
+      try {
+        const gen = await generateOne({
+          channel,
+          prompt: finalPrompt,
+          model,
+          aspectRatio,
+          referenceImages,
+          resolution: args.resolution || '',
+          cfg,
+          imagesDir: IMAGES_DIR,
+          baseName: record.ts.replace(/[-:]/g, '').replace('T', '-').slice(0, 15),
+          timeoutMs: args.timeout ? args.timeout * 1000 : 0,
+        })
 
-    try {
-      const { taskId, price, urls, cliArgs, warnings } = await generateImage({
-        prompt: finalPrompt, model, aspectRatio, referenceImageUrls, timeoutMs: (args.timeout || 420) * 1000,
-      })
-      const baseName = record.ts.replace(/[-:]/g, '').replace('T', '-').slice(0, 15)
-      const saved = await downloadImages(urls, IMAGES_DIR, baseName)
+        // 产出校验：请求比例 vs 实际像素，不达标直接判不合格，不许静默"完成"。
+        const checks = gen.files.map((s) => {
+          const size = imageSizeFromBuffer(readFileSync(s.file))
+          return { file: s.file.replace(/\\/g, '/').split('/').pop(), size, ratio: ratioMismatch(gen.resolvedRatio, size) }
+        })
+        const failedRatio = checks.filter((c) => c.ratio && !c.ratio.ok)
+        const ratioLine = checks.map((c) => c.size
+          ? `${c.file} ${c.size.width}×${c.size.height}${c.ratio ? `（要求 ${c.ratio.want}，实得 ${c.ratio.got}${c.ratio.ok ? ' ✓' : ' ✗'}）` : ''}`
+          : `${c.file} 尺寸无法识别`).join('\n')
 
-      // 产出校验：请求比例 vs 实际像素，不达标直接判不合格，不许静默"完成"。
-      const checks = saved.map((s) => {
-        const size = imageSizeFromBuffer(readFileSync(s.file))
-        return { file: s.file.replace(/\\/g, '/').split('/').pop(), size, ratio: ratioMismatch(aspectRatio, size) }
-      })
-      const failedRatio = checks.filter((c) => c.ratio && !c.ratio.ok)
-      const ratioLine = checks.map((c) => c.size
-        ? `${c.file} ${c.size.width}×${c.size.height}${c.ratio ? `（要求 ${c.ratio.want}，实得 ${c.ratio.got}${c.ratio.ok ? ' ✓' : ' ✗'}）` : ''}`
-        : `${c.file} 尺寸无法识别`).join('\n')
-
-      updateHistory(record.id, {
-        status: failedRatio.length ? 'ratio_mismatch' : 'completed', taskId, price,
-        reviewState: 'awaiting', // 必须等用户验收，才允许出下一张
-        cliArgs: cliArgs.map((a, i) => (i === 1 ? `<prompt ${String(a).length} chars>` : a)),
-        referenceUrls: referenceImageUrls,
-        sizeChecks: checks.map((c) => ({ file: c.file, ...(c.size || {}), ratio: c.ratio })),
-        warnings,
-        files: saved.map((s) => ({ file: s.file.replace(/\\/g, '/').split('/').pop(), url: s.url })),
-        urls,
-      })
-      const fileList = saved.map((s) => s.file).join('\n')
-      const warnLine = warnings.length ? `\n⚠️ ${warnings.join('\n⚠️ ')}` : ''
-      if (failedRatio.length) {
-        return result(false,
-          `生成完成但**比例不符**（消耗 ${price ?? '未知'} 积分），已判不合格，请勿直接使用：\n${ratioLine}${warnLine}`,
+        updateHistory(record.id, {
+          status: failedRatio.length ? 'ratio_mismatch' : 'completed',
+          taskId: gen.taskId, price: gen.price,
+          channel: gen.channel, channelLabel: gen.channelLabel, model: gen.model,
+          resolvedRatio: gen.resolvedRatio, referenceCount: gen.referenceCount,
+          reviewState: 'awaiting', // 必须等用户验收，才允许出下一张
+          cliArgs: gen.cliArgs,
+          sizeChecks: checks.map((c) => ({ file: c.file, ...(c.size || {}), ratio: c.ratio })),
+          warnings: gen.warnings,
+          files: gen.files.map((f) => ({ file: f.file.replace(/\\/g, '/').split('/').pop(), url: f.url || '' })),
+          urls: gen.files.map((f) => f.url).filter(Boolean),
+        })
+        const fileList = gen.files.map((s) => s.file).join('\n')
+        const warnLine = gen.warnings.length ? `\n⚠️ ${gen.warnings.join('\n⚠️ ')}` : ''
+        const priceLine = gen.price != null ? `${gen.price} 积分` : (gen.channel === 'dreamina' ? '即梦积分（2K 约 6/张）' : '未知')
+        if (failedRatio.length) {
+          return result(false,
+            `生成完成但**比例不符**（通道 ${gen.channelLabel}｜模型 ${gen.model}，消耗 ${priceLine}），已判不合格，请勿直接使用：\n${ratioLine}${warnLine}`,
+            fileList)
+        }
+        return result(true,
+          `生成完成（通道 ${gen.channelLabel}｜模型 ${gen.model}｜比例 ${gen.resolvedRatio}，消耗 ${priceLine}），` +
+          `已保存 ${gen.files.length} 张图到 ${DATA_DIR} 的 images/ 目录（历史记录 ${record.id}）。` +
+          `\n参考图 ${gen.referenceCount} 张已随请求提交。尺寸核验：\n${ratioLine}` +
+          `\n⚠️ 尺寸合格 ≠ 内容合格：请按 6 条硬检查逐项比对参考图（产品一致性/物理落地/透视/占比/色彩/无多余标注），再决定是否交付。` +
+          (lockText ? '\n已自动注入 Campaign Style Lock。' : '') +
+          `\n验收后再调 ecom_review_image（approve / reject）。` + warnLine,
           fileList)
+      } catch (err) {
+        updateHistory(record.id, { status: 'failed', error: String(err?.message || err).slice(0, 800) })
+        throw err
       }
-      return result(true,
-        `生成完成，消耗积分 ${price ?? '未知'}，已保存 ${saved.length} 张图到 ${DATA_DIR} 的 images/ 目录（历史记录 ${record.id}）。` +
-        `\n参考图 ${referenceImageUrls.length} 张已随请求提交（${REF_PARAM}）。尺寸核验：\n${ratioLine}` +
-        `\n⚠️ 尺寸合格 ≠ 内容合格：请按 6 条硬检查逐项比对参考图（产品一致性/物理落地/透视/占比/色彩/无多余标注），再决定是否交付。` +
-        (lockText ? '\n已自动注入 Campaign Style Lock。' : '') + warnLine,
-        fileList)
-    } catch (err) {
-      updateHistory(record.id, { status: 'failed', error: String(err?.message || err).slice(0, 800) })
-      throw err
-    }
     } finally {
-      lock.release()
+      gate.release()
     }
   },
 }
@@ -263,7 +283,7 @@ export const ecomReviewImageTool = {
 // ---------------------------------------------------------------------------
 export const ecomHistoryTool = {
   name: 'ecom_history',
-  description: '查询/管理电商生图历史：每条记录含 Prompt、模型、比例、消耗积分、生成的图片文件路径。用户问「刚才生成了哪些图」「上次的图在哪」时使用。所有图片也在侧栏「电商视觉」面板的画廊展示。',
+  description: '查询/管理电商生图历史：每条记录含通道、模型、比例、Prompt、消耗积分、生成的图片文件路径与验收状态。用户问「刚才生成了哪些图」「上次的图在哪」时使用。所有图片也在侧栏「电商视觉」面板的画廊展示。',
   parameters: {
     type: 'object',
     additionalProperties: false,
@@ -294,8 +314,9 @@ export const ecomHistoryTool = {
     const lines = list.map((r) => {
       const files = (r.files || []).map((f) => f.file).join(', ')
       const label = String(r.title || r.prompt || '未命名')
-      const review = r.reviewState === 'awaiting' ? ' · ⏳待验收' : ''
-      return `- ${r.ts} [${r.status}] ${label.slice(0, 60)} · ${r.model || '-'} · ${r.aspectRatio || '-'} · ${r.price ?? '-'} 积分${files ? ` · ${files}` : ''}${review} · id=${r.id}`
+      const review = r.reviewState === 'awaiting' ? ' · ⏳待验收' : r.reviewState === 'approved' ? ' · ✓已验收' : r.reviewState === 'rejected' ? ' · ✗已否决' : ''
+      const channel = r.channelLabel || r.channel || '-'
+      return `- ${r.ts} [${r.status}] ${label.slice(0, 60)} · ${channel} · ${r.model || '-'} · ${r.aspectRatio || '-'} · ${r.price ?? '-'} 积分${files ? ` · ${files}` : ''}${review} · id=${r.id}`
     })
     return result(true, `共 ${readHistory().length} 条历史，最近 ${list.length} 条：`, lines.join('\n'))
   },
@@ -360,13 +381,13 @@ export const ecomStyleLockTool = {
 }
 
 // ---------------------------------------------------------------------------
-// 工具 4：ecom_template —— 25 个场景模板查询
+// 工具 4：ecom_template —— 25 个场景模板 + 实测案例图
 // ---------------------------------------------------------------------------
 export const ecomTemplateTool = {
   name: 'ecom_template',
   description:
     '查询电商视觉的 25 个场景模板（主图/生活方式/平铺/微距/海报/社媒/UGC/模特/前后对比/包装/信息图/尺寸图/多产品/直播/虚拟试穿/爆炸图/隐形模特/多角度/杂志/节日/轻奢/设备样机/门店/运动 等）。' +
-    'search 用中文或英文关键词找场景；get 拿到完整 JSON（prompt_template/variants/category_tips/examples）后按它构建生图 Prompt。',
+    'search 用中文或英文关键词找场景；get 拿到完整 JSON（prompt_template/variants/category_tips/examples/anti_ai_tips + 实测案例图路径）后按它构建生图 Prompt。',
   parameters: {
     type: 'object',
     additionalProperties: false,
@@ -383,26 +404,78 @@ export const ecomTemplateTool = {
     const skillDirs = skillDirsRef.dirs
     if (args.action === 'list') {
       const templates = listTemplates(skillDirs)
-      return result(true, `共 ${templates.length} 个场景模板：`,
-        templates.map((t) => `- ${t.name}（id=${t.id}）${t.description ? `：${t.description}` : ''}`).join('\n'))
+      return result(true, `共 ${templates.length} 个场景模板（带 📷 的有实测案例图）：`,
+        templates.map((t) => `- ${t.name}（id=${t.id}）${t.caseImage ? ' 📷' : ''}${t.description ? `：${t.description}` : ''}`).join('\n'))
     }
     if (args.action === 'search') {
       if (!args.keyword) throw new Error('search 需要 keyword。')
       const found = searchTemplates(skillDirs, args.keyword)
       if (!found.length) return result(false, `没有匹配「${args.keyword}」的模板，试试 list 看全部。`)
       return result(true, `匹配到 ${found.length} 个模板：`,
-        found.map((t) => `- ${t.name}（id=${t.id}）`).join('\n'))
+        found.map((t) => `- ${t.name}（id=${t.id}）${t.caseImage ? ' 📷' : ''}`).join('\n'))
     }
     if (!args.id) throw new Error('get 需要 id。')
     const tpl = getTemplate(skillDirs, args.id)
     if (!tpl) return result(false, `没有找到模板 ${args.id}。`)
-    return result(true, `模板「${tpl.name}」完整定义：`, JSON.stringify(tpl, null, 2))
+    return result(true,
+      `模板「${tpl.name}」完整定义：${tpl.caseImage ? `\n📷 实测案例图（面板「模板」标签可看）：docs/case/${tpl.caseImage}` : '\n（这个场景暂无实测案例图）'}`,
+      JSON.stringify(tpl, null, 2))
+  },
+}
+
+// ---------------------------------------------------------------------------
+// 工具 5：ecom_models —— 渠道 / 模型选择（点 3：大模型生图 API 可选）
+// ---------------------------------------------------------------------------
+export const ecomModelsTool = {
+  name: 'ecom_models',
+  description:
+    '列出可用生图通道与模型（即梦 dreamina-canvas / apiz CLI）的就绪状态、版本、积分余额、模型 id、支持比例与参考图上限。' +
+    '用户问「用哪个模型出图」「即梦和 apiz 哪个能用」「查一下余额/可用模型」时先调它；list 走 60 秒缓存，check 强制实时探测。',
+  parameters: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['action'],
+    properties: {
+      action: str('list 看渠道/模型/余额（缓存 60 秒）；check 强制重新探测', { enum: ['list', 'check'] }),
+      channel: str('可选：只看某个通道', { enum: ['dreamina', 'apiz'] }),
+      limit: num('可选：每个通道最多列几个模型，默认 12'),
+    },
+  },
+  output: OUTPUT,
+  async execute(args) {
+    check(args, this.parameters)
+    const cfg = configRef.config || {}
+    const { channels, probedAt } = await probeChannels(cfg, { force: args.action === 'check' })
+    const picked = channels.filter((c) => !args.channel || c.key === args.channel)
+    const limit = args.limit || 12
+    const blocks = picked.map((c) => {
+      const state = !c.ready ? '✗ 不可用' : c.authOk ? '✅ 可用' : '🟠 未登录'
+      const head = `${c.key === 'dreamina' ? '即梦 Seedream' : 'apiz 多模型'} ${state}${c.ready ? `（v${c.version}）` : ''}`
+      const account = c.account
+        ? (c.key === 'dreamina'
+          ? `余额 ${c.account.credits} 积分${c.account.isVip ? `（VIP ${c.account.vipLevel}）` : ''}`
+          : `余额 ${c.account.balance} 积分 / ¥${c.account.balanceYuan}`)
+        : (c.ready && !c.authOk ? `登录：${c.login}${c.accountError ? `（${c.accountError}）` : ''}` : (c.accountError ? `余额读取失败：${c.accountError}` : ''))
+      const models = c.models.slice(0, limit).map((m) => `  - ${m.id}${m.isDefault ? '（通道默认）' : ''}｜${m.label}｜比例 ${m.ratios.join('/')}${m.resolutions?.length ? `｜分辨率 ${m.resolutions.join('/')}` : ''}｜参考图 ≤${m.maxRefs}`)
+      return [head, account, `模型（${c.models.length}${c.modelsSource === 'fallback' ? '，兜底清单' : ''}）：`, ...models].filter(Boolean).join('\n')
+    })
+    const tips = [
+      `默认通道：${cfg.defaultChannel || 'auto'}（auto=即梦优先，不可用回落 apiz）`,
+      `即梦默认：${cfg.dreaminaModel || DREAMINA_DEFAULT_MODEL} @ ${cfg.dreaminaResolution || DREAMINA_DEFAULT_RESOLUTION}，2K 约 6 积分/张`,
+      `apiz 默认：${cfg.defaultModel || DEFAULT_MODEL}`,
+      `即梦支持比例：${DREAMINA_RATIOS.join('/')}（4:5 等会自动换算）`,
+      `探测时间：${probedAt}`,
+    ].join('\n')
+    return result(true, '可用生图通道：', [...blocks, '---', tips].join('\n\n'))
   },
 }
 
 const skillDirsRef = { dirs: [] }
 
-export function apply(ctx) {
+export function apply(ctx, config) {
+  // 宿主把 Config schema 解析后的值作为第二个参数传入（改配置会热替换插件 → apply 再跑）。
+  // 工具与面板 API 都从 configRef 读，避免各自持有过期副本。
+  configRef.config = config && typeof config === 'object' ? config : {}
   const root = join(dirname(fileURLToPath(import.meta.url)), '..')
   const skillDirs = [join(root, 'skills', 'ecom-details-image')]
   skillDirsRef.dirs = skillDirs
@@ -412,6 +485,10 @@ export function apply(ctx) {
   ctx.effect(() => ctx.tools.register(ecomHistoryTool), `${name}: tool history`)
   ctx.effect(() => ctx.tools.register(ecomStyleLockTool), `${name}: tool stylelock`)
   ctx.effect(() => ctx.tools.register(ecomTemplateTool), `${name}: tool template`)
+  ctx.effect(() => ctx.tools.register(ecomModelsTool), `${name}: tool models`)
   ctx.effect(() => ctx.skills.registerProvider(() => createSkillProvider(skillDirs)), `${name}: skills`)
   ctx.effect(() => registerApi(ctx, { skillDirs, configRef }), `${name}: routes`)
 }
+
+// 供面板 API / 测试复用
+export { listCases, skillDirsRef, configRef }
