@@ -2,7 +2,7 @@
 
 DeepSeek Harness（dsh）插件：**电商图片生成 + 管理工作台**。不只是教模型写 Prompt——6 个原生工具覆盖通道/模型选择、模板与案例查询、Style Lock 持久化、双通道直接生图、验收闸门、历史管理；侧栏「电商视觉」面板提供 **指南 / 案例 / 模板 / 出图 / 画廊 / Style Lock** 六个可点击标签。
 
-方法论来自 [ecom-details-image](https://github.com/liangdabiao/ecom-details-image)（MIT，liangdabiao）。v0.3.0 跟随上游升级：**即梦 Seedream 5.5 成为默认生图通道**，并内置上游 30 张实测案例图与对应 Prompt。
+方法论来自 [ecom-details-image](https://github.com/liangdabiao/ecom-details-image)（MIT，liangdabiao）。v0.3.x 跟随上游升级：**即梦 Seedream 5.5 成为默认生图通道**，并内置上游 30 张实测案例图与对应 Prompt。
 
 <img width="1752" height="1065" alt="image" src="https://github.com/user-attachments/assets/26fff5eb-4ac7-45e2-a20a-619508bcbe50" />
 
@@ -88,7 +88,7 @@ stylelock.json Campaign Style Lock
 dsh plugin --profile web add github:liangdabiao/dsh-ecom-image
 
 # 钉版本
-dsh plugin --profile web add github:liangdabiao/dsh-ecom-image#v0.3.0
+dsh plugin --profile web add github:liangdabiao/dsh-ecom-image#v0.3.1
 ```
 
 > ⚠️ 本包**没有发布到 npm**，`dsh plugin add dsh-ecom-image` 会失败——请用上面的 `github:` 形式。

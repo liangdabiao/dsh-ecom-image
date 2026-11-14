@@ -569,9 +569,14 @@ function GalleryTab() {
 
   return h('div', null,
     h('div', { style: styles.row },
-      h('button', { style: campaign === '' ? styles.chipActive : styles.chip, onClick: () => setCampaign('') }, `全部 ${history.length}`),
+      h('span', { style: styles.filterLabel }, 'Campaign 筛选'),
+      h('button', {
+        style: campaign === '' ? styles.chipActive : styles.chip,
+        onClick: () => setCampaign(''), title: '显示全部生成记录',
+      }, `全部 ${history.length}`),
       campaigns.map((c) => h('button', {
-        key: c, style: campaign === c ? styles.chipActive : styles.chip, onClick: () => setCampaign(c),
+        key: c, style: campaign === c ? styles.chipActive : styles.chip,
+        onClick: () => setCampaign(c), title: `只看 Campaign「${c}」的整组图`,
       }, `🔒 ${c}`))),
 
     h('div', { style: styles.gallery },
@@ -702,8 +707,9 @@ const styles = {
   buttonGhost: { padding: '6px 12px', border: '1px solid #d9d9de', borderRadius: 8, background: '#fff', color: '#333', cursor: 'pointer', fontSize: 12 },
   disabled: { opacity: 0.5, cursor: 'not-allowed' },
   row: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 },
-  chip: { padding: '4px 12px', border: '1px solid #d9d9de', borderRadius: 999, background: '#fff', cursor: 'pointer', fontSize: 12 },
-  chipActive: { padding: '4px 12px', border: '1px solid #8a5a00', borderRadius: 999, background: '#f5f0e8', color: '#5a3a00', cursor: 'pointer', fontSize: 12, fontWeight: 600 },
+  chip: { padding: '4px 12px', border: '1px solid #d9d9de', borderRadius: 999, background: '#fff', color: '#1a1a1a', cursor: 'pointer', fontSize: 12, lineHeight: 1.6 },
+  chipActive: { padding: '4px 12px', border: '1px solid #8a5a00', borderRadius: 999, background: '#f5f0e8', color: '#5a3a00', cursor: 'pointer', fontSize: 12, fontWeight: 600, lineHeight: 1.6 },
+  filterLabel: { fontSize: 11, color: '#6b6b73', fontWeight: 600 },
   card: { background: '#fff', border: '1px solid #e3e3e6', borderRadius: 10, padding: 12, marginBottom: 10 },
   sectionHead: { display: 'flex', gap: 8, alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 8 },
   sectionTitle: { fontWeight: 700, marginBottom: 2 },

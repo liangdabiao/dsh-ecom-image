@@ -71,6 +71,19 @@ const CASES = {
   ],
 }
 
+const HISTORY = [
+  {
+    id: 'gen-1', ts: '2026-11-14T02:00:00.000Z', title: '保温杯-主图1', prompt: 'hero prompt', status: 'completed',
+    channel: 'dreamina', channelLabel: '即梦 Seedream', model: 'seedream_5.5', aspectRatio: '1:1', price: 6,
+    campaign: '双11保温杯', reviewState: 'approved', files: [{ file: 'img-1.png', url: '' }],
+  },
+  {
+    id: 'gen-2', ts: '2026-11-14T02:10:00.000Z', title: '保温杯-场景图', prompt: 'scene prompt', status: 'completed',
+    channel: 'apiz', channelLabel: 'apiz 多模型', model: 'apiz/gpt-image-2.5-flare', aspectRatio: '3:4', price: 4,
+    campaign: '', reviewState: 'awaiting', files: [{ file: 'img-2.png', url: '' }],
+  },
+]
+
 test('面板：六标签 + 指南 CTA + 案例/模板/出图可点击使用', { skip: deps ? false : '未安装 jsdom/react/react-dom，跳过' }, async () => {
   const { JSDOM, React, createRoot, act } = deps
   const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></html>', {
@@ -91,7 +104,8 @@ test('面板：六标签 + 指南 CTA + 案例/模板/出图可点击使用', { 
     if (target.includes('/api/templates')) return json({ templates: TEMPLATES })
     if (target.includes('/api/template?')) return json({ template: { ...TEMPLATES[0], prompt_template: { type: 'flat lay', background: '#F5F1E8' }, defaults: { props: 'curated objects' }, variants: { luxury: { description: '奢华', overrides: { background: 'silk' } } }, category_tips: { beauty: 'skincare ritual' }, examples: ['example prompt one'] } })
     if (target.includes('/api/stylelock')) return json({ locks: {} })
-    return json({ history: [], items: [], count: 0 })
+    if (target.includes('/api/history')) return json({ history: HISTORY })
+    return json({ items: [], images: [], count: 0 })
   }
 
   let factory = null
@@ -184,6 +198,24 @@ test('面板：六标签 + 指南 CTA + 案例/模板/出图可点击使用', { 
   assert.ok(starts[3][1].prompt.startsWith(EXPECTED_PROMPT), '出图指令应以固定前缀开头')
   assert.ok(starts[3][1].prompt.includes('seedream_5.5'), '出图指令应带模型')
   assert.ok(starts[3][1].prompt.includes('一次只出一张'), '出图指令应声明一次一张')
+
+  // ⑥ 画廊：顶部 Campaign 筛选 tag 必须可见（回归：曾白底白字看不见）
+  await clickTab('画廊')
+  assert.match(document.body.textContent, /Campaign 筛选/, '画廊顶部应有筛选标签')
+  const chips = [...document.querySelectorAll('button')].filter((b) => /^全部 |^🔒 /i.test(b.textContent))
+  assert.ok(chips.length >= 2, '画廊顶部应有「全部 / campaign」筛选 tag')
+  for (const chip of chips) {
+    const color = window.getComputedStyle(chip).color
+    assert.notEqual(color, 'rgb(255, 255, 255)', `tag「${chip.textContent}」文字不能是白色`)
+    assert.ok(chip.getAttribute('style').includes('color'), 'tag 必须显式设置 color（深色主题下 button 默认色会变白）')
+  }
+  // 点 campaign tag 过滤只留该组
+  const campChip = chips.find((b) => b.textContent.includes('双11'))
+  assert.ok(campChip, '应有 campaign tag')
+  await act(async () => { campChip.dispatchEvent(new window.MouseEvent('click', { bubbles: true })) })
+  await flush(30)
+  assert.equal(document.querySelectorAll('img[src*="/api/image?file=img-1.png"]').length, 1, '应只剩该 campaign 的图')
+  assert.equal(document.querySelectorAll('img[src*="/api/image?file=img-2.png"]').length, 0)
 
   await act(async () => { root.unmount() })
 })

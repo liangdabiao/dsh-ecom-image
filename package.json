@@ -1,6 +1,6 @@
 {
   "name": "dsh-ecom-image",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "电商图片生成工作台：即梦 dreamina-canvas（Seedream 5.5）+ apiz CLI 双通道生图、渠道/模型选择、25 个场景模板（带 30 张实测案例图与对应 Prompt）、生成历史画廊、Campaign Style Lock、一次一张验收闸门。",
   "license": "MIT",
   "type": "module",
