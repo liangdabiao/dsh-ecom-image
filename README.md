@@ -85,13 +85,13 @@ stylelock.json Campaign Style Lock
 
 ```bash
 # 从 GitHub 装（dist/client.js 已入库，装完即有面板）
-dsh plugin --profile web add github:liangdabiao/dsh-ecom-image
+dsh plugin --profile web add https://github.com/liangdabiao/dsh-ecom-image
 
 # 钉版本
-dsh plugin --profile web add github:liangdabiao/dsh-ecom-image#v0.3.1
+dsh plugin --profile web add https://github.com/liangdabiao/dsh-ecom-image#v0.3.1
 ```
 
-> ⚠️ 本包**没有发布到 npm**，`dsh plugin add dsh-ecom-image` 会失败——请用上面的 `github:` 形式。
+> ⚠️ 本包**没有发布到 npm**，`dsh plugin add dsh-ecom-image` 会失败——请用上面的 GitHub 地址形式。
 >
 > `dist/client.js` 是入库文件：dsh 宿主直接消费已构建的客户端 bundle（`package.json` → `exports["./client"]`），缺它会导致插件激活失败、侧栏「电商视觉」面板不出现。改完源码记得 `npm run build` 再提交。
 
